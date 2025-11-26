@@ -46,11 +46,28 @@ slint::slint! {
         height: 240px;
 
         Rectangle {
-            x: 0px;
-            y: 0px;
-            width: parent.width;
-            height: parent.height;
-            background: #00FF00;
+            background: #003300;
+            border-width: 2px;
+            border-color: #00FF00;
+        }
+
+        Rectangle {
+            x: 10px;
+            y: 10px;
+            width: 100px;
+            height: 40px;
+            background: #FFAA00;
+            border-width: 2px;
+            border-color: black;
+            // no text → no fonts required
+        }
+
+        Rectangle {
+            x: 10px;
+            y: 70px;
+            width: 200px;
+            height: 20px;
+            background: #0000AA;
         }
     }
 }
@@ -134,31 +151,18 @@ impl Platform for EspBackend {
         let rst = Output::new(peripherals.GPIO4, Level::Low, Default::default());
 
         let mut buf512 = [0u8; 512];
-        // let interface = mipidsi::interface::SpiInterface::new(
-        //     embedded_hal_bus::spi::ExclusiveDevice::new_no_delay(spi, cs).unwrap(),
-        //     dc,
-        //     &mut buf512,
-        // );
-        let interface = display_interface_spi::SPIInterface::new(
+        let interface = mipidsi::interface::SpiInterface::new(
             embedded_hal_bus::spi::ExclusiveDevice::new_no_delay(spi, cs).unwrap(),
             dc,
-            // &mut buf512,
+            &mut buf512,
         );
 
-        // let mut display = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
-        //     .reset_pin(rst)
-        //     .orientation(Orientation::new().rotate(Rotation::Deg180))
-        //     .color_order(ColorOrder::Bgr)
-        //     .init(&mut esp_hal::delay::Delay::new())
-        //     .unwrap();
-        let mut display = Ili9341::new(
-      interface,
-      rst,
-      &mut Delay::new(),
-      ili9341::Orientation::Landscape,
-      DisplaySize240x320,
-  )
-  .unwrap();
+        let mut display = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
+            .reset_pin(rst)
+            .orientation(Orientation::new().rotate(Rotation::Deg90))
+            .color_order(ColorOrder::Bgr)
+            .init(&mut esp_hal::delay::Delay::new())
+            .unwrap();
 
         // Create the draw buffer
         let mut linebuf = [Rgb565Pixel(0); 320];
@@ -169,7 +173,7 @@ impl Platform for EspBackend {
 
         // Get the Slint window that was created earlier
         let window = self.window.borrow().clone().unwrap();
-        window.set_size(slint::PhysicalSize::new(240, 320));
+        window.set_size(slint::PhysicalSize::new(320, 240));
         uart.write("Hello world!2\n".as_bytes()).unwrap();
         window.request_redraw();
 
@@ -181,12 +185,12 @@ use embedded_graphics_core::draw_target::DrawTarget;
             slint::platform::update_timers_and_animations();
 
             window.draw_if_needed(|renderer| {
-                drawbuf.display.clear(Rgb565::GREEN).unwrap();
-// drawbuf.display
-//         .set_pixels(0, 0, 10, 1, fb)
-//         .unwrap();
+                // drawbuf.display.clear(Rgb565::RED).unwrap();
+drawbuf.display
+        .set_pixels(0, 0, 10, 1, fb)
+        .unwrap();
         uart.write("3".as_bytes()).unwrap();
-                // renderer.render_by_line(&mut drawbuf);
+                renderer.render_by_line(&mut drawbuf);
             });
             window.request_redraw();
         }
