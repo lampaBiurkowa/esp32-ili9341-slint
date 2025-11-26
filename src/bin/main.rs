@@ -6,8 +6,13 @@
     holding buffers for the duration of a data transfer."
 )]
 
+use core::cell::RefCell;
 use core::ops::Range;
 
+use embedded_graphics_core::prelude::RgbColor;
+use esp_backtrace as _;
+use alloc::boxed::Box;
+use alloc::rc::Rc;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_hal::clock::CpuClock;
 use embedded_hal::digital::OutputPin;
@@ -16,18 +21,18 @@ use embedded_graphics_core::pixelcolor::Rgb565;
 use esp_hal::delay::Delay;
 use esp_hal::gpio::{Level, Output};
 use esp_hal::main;
+use esp_hal::peripherals::Peripherals;
 use esp_hal::spi::master::Spi;
 use esp_hal::time::{Duration, Instant, Rate};
 use esp_hal::uart::Uart;
+use ili9341::{DisplaySize240x320, Ili9341};
+use log::info;
 use mipidsi::Builder;
 use mipidsi::interface::SpiInterface;
 use mipidsi::models::ILI9341Rgb565;
+use mipidsi::options::{ColorOrder, Orientation, Rotation};
+use slint::platform::Platform;
 use slint::platform::software_renderer::{LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
-
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
-}
 
 extern crate alloc;
 
@@ -37,13 +42,15 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 slint::slint! {
     export component MainWindow inherits Window {
-        width: 240px;
-        height: 320px;
+        width: 320px;
+        height: 240px;
 
-        Text {
-            text: "Hello Slint!";
-            horizontal-alignment: center;
-            vertical-alignment: center;
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            background: #00FF00;
         }
     }
 }
@@ -80,64 +87,131 @@ where
     }
 }
 
-#[main]
-fn main() -> ! {
-    // generator version: 1.0.1
-    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
-    let peripherals = esp_hal::init(config);
+struct EspBackend {
+    window: RefCell<Option<Rc<MinimalSoftwareWindow>>>,
+    peripherals: RefCell<Option<Peripherals>>,
+}
 
-    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98768);
-    let mut uart = Uart::new(peripherals.UART0, esp_hal::uart::Config::default()).unwrap();
-    uart.write("Hello world!1\n".as_bytes()).unwrap();
-    let spi = Spi::<esp_hal::Blocking>::new(
-        peripherals.SPI2,
-        esp_hal::spi::master::Config::default()
-            .with_frequency(Rate::from_mhz(40))
-            .with_mode(esp_hal::spi::Mode::_0),
-    )
-    .unwrap()
-    .with_sck(peripherals.GPIO14)
-    .with_mosi(peripherals.GPIO13);
+impl Default for EspBackend {
+    fn default() -> Self {
+        Self {
+            window: RefCell::new(None),
+            peripherals: RefCell::new(None)
+        }
+    }
+}
 
-    // Display pins
-    let dc = Output::new(peripherals.GPIO2, Level::Low, Default::default());
-    let cs = Output::new(peripherals.GPIO15, Level::Low, Default::default());
-    let rst = Output::new(peripherals.GPIO4, Level::High, Default::default());
-    let mut backlight = Output::new(peripherals.GPIO5, Level::High, Default::default());
-
-    let spi_delay = Delay::new();
-    let spi_device = ExclusiveDevice::new(spi, cs, spi_delay).unwrap();
-
-    // Wrap SPI into bus
-    let mut buffer = [0u8; 512];
-    let spi_dev = SpiInterface::new(spi_device, dc, &mut buffer);
-
-    // Initialize ILI9341
-    let mut delay = esp_hal::delay::Delay::new();
-    let display = Builder::new(ILI9341Rgb565, spi_dev)
-        .reset_pin(rst)
-        .init(&mut delay)
-        .unwrap();
-    backlight.set_high();
-
-    let mut window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
-    uart.write("Hello2\n".as_bytes()).unwrap();
-    window.set_size(slint::PhysicalSize::new(240, 320));
-    uart.write("Hello3\n".as_bytes()).unwrap();
-    let mut draw_buffer = DrawBuf {
-        display,
-        buffer: &mut [Rgb565Pixel(0); 240], // width of display
-    };
-    uart.write("Hello4\n".as_bytes()).unwrap();
-
-    loop {
-        slint::platform::update_timers_and_animations();
-    uart.write("Hello5\n".as_bytes()).unwrap();
-            window.draw_if_needed(|renderer| { renderer.render_by_line(&mut draw_buffer); });
-
-        let delay_start = Instant::now();
-        while delay_start.elapsed() < Duration::from_millis(500) {}
+impl Platform for EspBackend {
+    fn duration_since_start(&self) -> core::time::Duration {
+        core::time::Duration::from_millis(Instant::now().duration_since_epoch().as_millis())
     }
 
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.0.0/examples/src/bin
+    fn create_window_adapter(
+        &self,
+    ) -> Result<Rc<dyn slint::platform::WindowAdapter>, slint::PlatformError> {
+        let w = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        self.window.replace(Some(w.clone()));
+        Ok(w)
+    }
+
+    fn run_event_loop(&self) -> Result<(), slint::PlatformError> {
+        let peripherals = self.peripherals.borrow_mut().take().expect("Peripherals already taken");
+        let mut uart = Uart::new(peripherals.UART0, esp_hal::uart::Config::default()).unwrap();
+    uart.write("Hello world!1\n".as_bytes()).unwrap();
+        let spi = Spi::<esp_hal::Blocking>::new(
+            peripherals.SPI2,
+            esp_hal::spi::master::Config::default()
+                .with_frequency(Rate::from_mhz(40))
+                .with_mode(esp_hal::spi::Mode::_0),
+        )
+        .unwrap()
+        .with_sck(peripherals.GPIO18)
+        .with_mosi(peripherals.GPIO23);
+
+        // Display pins
+        let dc = Output::new(peripherals.GPIO2, Level::Low, Default::default());
+        let cs = Output::new(peripherals.GPIO15, Level::Low, Default::default());
+        let rst = Output::new(peripherals.GPIO4, Level::Low, Default::default());
+
+        let mut buf512 = [0u8; 512];
+        // let interface = mipidsi::interface::SpiInterface::new(
+        //     embedded_hal_bus::spi::ExclusiveDevice::new_no_delay(spi, cs).unwrap(),
+        //     dc,
+        //     &mut buf512,
+        // );
+        let interface = display_interface_spi::SPIInterface::new(
+            embedded_hal_bus::spi::ExclusiveDevice::new_no_delay(spi, cs).unwrap(),
+            dc,
+            // &mut buf512,
+        );
+
+        // let mut display = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
+        //     .reset_pin(rst)
+        //     .orientation(Orientation::new().rotate(Rotation::Deg180))
+        //     .color_order(ColorOrder::Bgr)
+        //     .init(&mut esp_hal::delay::Delay::new())
+        //     .unwrap();
+        let mut display = Ili9341::new(
+      interface,
+      rst,
+      &mut Delay::new(),
+      ili9341::Orientation::Landscape,
+      DisplaySize240x320,
+  )
+  .unwrap();
+
+        // Create the draw buffer
+        let mut linebuf = [Rgb565Pixel(0); 320];
+        let mut drawbuf = DrawBuf {
+            display,
+            buffer: &mut linebuf,
+        };
+
+        // Get the Slint window that was created earlier
+        let window = self.window.borrow().clone().unwrap();
+        window.set_size(slint::PhysicalSize::new(240, 320));
+        uart.write("Hello world!2\n".as_bytes()).unwrap();
+        window.request_redraw();
+
+let fb = [Rgb565::new(0,255,0); 10];   // just 10 pixels
+use embedded_graphics_core::draw_target::DrawTarget;
+
+        // Main loop
+        loop {
+            slint::platform::update_timers_and_animations();
+
+            window.draw_if_needed(|renderer| {
+                drawbuf.display.clear(Rgb565::GREEN).unwrap();
+// drawbuf.display
+//         .set_pixels(0, 0, 10, 1, fb)
+//         .unwrap();
+        uart.write("3".as_bytes()).unwrap();
+                // renderer.render_by_line(&mut drawbuf);
+            });
+            window.request_redraw();
+        }
+    }
+}
+
+
+#[main]
+fn main() -> ! {
+    esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98768);
+
+    let config = esp_hal::Config::default();
+    let peripherals = esp_hal::init(config);
+    esp_println::logger::init_logger_from_env();
+    info!("Peripherals initialized");
+
+    slint::platform::set_platform(Box::new(EspBackend {
+        peripherals: RefCell::new(Some(peripherals)),
+        window: RefCell::new(None),
+    }))
+        .expect("backend already initialized");
+
+    let app = MainWindow::new().unwrap();
+
+    app.run().unwrap();
+
+    loop {}
 }
