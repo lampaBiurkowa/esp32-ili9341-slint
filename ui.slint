@@ -1,23 +1,101 @@
-import { Button, Switch } from "std-widgets.slint";
+import { Button, Switch, Slider, CheckBox, LineEdit } from "std-widgets.slint";
+
+component ProgressBar {
+    in property<int> value: 0;
+    in property<int> minimum: 0;
+    in property<int> maximum: 100;
+
+    width: 280px;
+    height: 16px;
+
+    Rectangle {
+        border-width: 1px;
+        border-color: #444;
+        background: #222;
+
+        Rectangle {
+            width: (root.width * (root.value - root.minimum)) / (root.maximum - root.minimum);
+            height: parent.height;
+            background: #00aaff;
+        }
+    }
+}
 
 export component MainWindow inherits Window {
     width: 320px;
     height: 240px;
+
     in-out property<bool> switch_state: false;
+    in-out property<bool> checkbox_value: true;
     in-out property<bool> button_pressed: false;
+    in-out property<float> slider_value: 50.0;
+    in-out property<string> input_text: "Hello";
 
-    Button {
-        x: 20px;
-        y: 20px;
-        width: 80px;
-        height: 40px;
-        text: "Click me!";
-        clicked => { root.button_pressed = true; }
-    }
+    VerticalLayout {
+        spacing: 8px;
+        padding: 12px;
 
-    Switch {
-        x: 120px;
-        y: 20px;
-        checked <=> root.switch_state;
+        Text {
+            text: "Slint UI Demo";
+            font-weight: 700;
+            color: #00aaff;
+            horizontal-alignment: center;
+        }
+
+        Button {
+            text: "Press me";
+            clicked => { root.button_pressed = true; }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: "Switch:"; }
+            Switch { checked <=> root.switch_state; }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: "Checkbox:"; }
+            CheckBox { checked <=> root.checkbox_value; }
+        }
+
+        HorizontalLayout {
+            spacing: 12px;
+            Text { text: "Name:"; }
+            LineEdit { text <=> root.input_text; }
+        }
+
+        VerticalLayout {
+            spacing: 4px;
+
+            Text {
+                text: "Value: " + root.slider_value;
+            }
+
+            Slider {
+                value <=> root.slider_value;
+                minimum: 0;
+                maximum: 100;
+            }
+
+            ProgressBar {
+                value: root.slider_value;
+                minimum: 0;
+                maximum: 100;
+            }
+        }
+
+        Rectangle { height: 10px; background: #0000; }
+
+        Button {
+            text: "Reset";
+            clicked => {
+                root.switch_state = false;
+                root.checkbox_value = true;
+                root.slider_value = 50;
+                root.input_text = "Hello";
+                root.button_pressed = false;
+            }
+        }
     }
 }
