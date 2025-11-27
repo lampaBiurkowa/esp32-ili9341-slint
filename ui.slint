@@ -1,0 +1,23 @@
+import { Button, Switch } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    width: 320px;
+    height: 240px;
+    in-out property<bool> switch_state: false;
+    in-out property<bool> button_pressed: false;
+
+    Button {
+        x: 20px;
+        y: 20px;
+        width: 80px;
+        height: 40px;
+        text: "Click me!";
+        clicked => { root.button_pressed = true; }
+    }
+
+    Switch {
+        x: 120px;
+        y: 20px;
+        checked <=> root.switch_state;
+    }
+}

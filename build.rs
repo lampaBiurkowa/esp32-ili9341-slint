@@ -1,7 +1,15 @@
+use slint_build::{CompilerConfiguration, EmbedResourcesKind};
+
 fn main() {
     linker_be_nice();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
+
+    slint_build::compile_with_config(
+        "ui.slint",
+        CompilerConfiguration::new().embed_resources(EmbedResourcesKind::EmbedForSoftwareRenderer))
+        .unwrap();
+    println!("cargo:rerun-if-changed=ui.slint");
 }
 
 fn linker_be_nice() {

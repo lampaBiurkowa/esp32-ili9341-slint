@@ -9,26 +9,18 @@
 use core::cell::RefCell;
 use core::ops::Range;
 
-use embedded_graphics_core::prelude::RgbColor;
 use esp_backtrace as _;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use embedded_hal_bus::spi::ExclusiveDevice;
-use esp_hal::clock::CpuClock;
 use embedded_hal::digital::OutputPin;
 use embedded_graphics_core::pixelcolor::raw::RawU16;
 use embedded_graphics_core::pixelcolor::Rgb565;
-use esp_hal::delay::Delay;
 use esp_hal::gpio::{Level, Output};
 use esp_hal::main;
 use esp_hal::peripherals::Peripherals;
 use esp_hal::spi::master::Spi;
-use esp_hal::time::{Duration, Instant, Rate};
-use esp_hal::uart::Uart;
-use ili9341::{DisplaySize240x320, Ili9341};
+use esp_hal::time::{Instant, Rate};
 use log::info;
-use mipidsi::Builder;
-use mipidsi::interface::SpiInterface;
 use mipidsi::models::ILI9341Rgb565;
 use mipidsi::options::{ColorOrder, Orientation, Rotation};
 use slint::platform::Platform;
@@ -40,37 +32,7 @@ extern crate alloc;
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
 
-slint::slint! {
-    export component MainWindow inherits Window {
-        width: 320px;
-        height: 240px;
-
-        Rectangle {
-            background: #003300;
-            border-width: 2px;
-            border-color: #00FF00;
-        }
-
-        Rectangle {
-            x: 10px;
-            y: 10px;
-            width: 100px;
-            height: 40px;
-            background: #FFAA00;
-            border-width: 2px;
-            border-color: black;
-            // no text → no fonts required
-        }
-
-        Rectangle {
-            x: 10px;
-            y: 70px;
-            width: 200px;
-            height: 20px;
-            background: #0000AA;
-        }
-    }
-}
+slint::include_modules!();
 
 struct DrawBuf<'a, Display> {
     display: Display,
@@ -133,8 +95,6 @@ impl Platform for EspBackend {
 
     fn run_event_loop(&self) -> Result<(), slint::PlatformError> {
         let peripherals = self.peripherals.borrow_mut().take().expect("Peripherals already taken");
-        let mut uart = Uart::new(peripherals.UART0, esp_hal::uart::Config::default()).unwrap();
-    uart.write("Hello world!1\n".as_bytes()).unwrap();
         let spi = Spi::<esp_hal::Blocking>::new(
             peripherals.SPI2,
             esp_hal::spi::master::Config::default()
@@ -157,9 +117,9 @@ impl Platform for EspBackend {
             &mut buf512,
         );
 
-        let mut display = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
+        let display = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
             .reset_pin(rst)
-            .orientation(Orientation::new().rotate(Rotation::Deg90))
+            .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
             .color_order(ColorOrder::Bgr)
             .init(&mut esp_hal::delay::Delay::new())
             .unwrap();
@@ -174,22 +134,12 @@ impl Platform for EspBackend {
         // Get the Slint window that was created earlier
         let window = self.window.borrow().clone().unwrap();
         window.set_size(slint::PhysicalSize::new(320, 240));
-        uart.write("Hello world!2\n".as_bytes()).unwrap();
-        window.request_redraw();
-
-let fb = [Rgb565::new(0,255,0); 10];   // just 10 pixels
-use embedded_graphics_core::draw_target::DrawTarget;
 
         // Main loop
         loop {
             slint::platform::update_timers_and_animations();
 
             window.draw_if_needed(|renderer| {
-                // drawbuf.display.clear(Rgb565::RED).unwrap();
-drawbuf.display
-        .set_pixels(0, 0, 10, 1, fb)
-        .unwrap();
-        uart.write("3".as_bytes()).unwrap();
                 renderer.render_by_line(&mut drawbuf);
             });
             window.request_redraw();
