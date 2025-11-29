@@ -5961,6 +5961,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 [[package]]
 name = "xpt2046"
 version = "0.3.1"
+source = "git+https://github.com/lampaBiurkowa/xpt2046.git#8622b99a2f47f43a7db48df4eef2802641b20948"
 dependencies = [
  "embedded-graphics",
  "embedded-graphics-core",

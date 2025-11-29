@@ -25,7 +25,7 @@ embedded-hal-bus = "0.3.0"
 esp-println = { version = "0.16.1", features = ["esp32", "log-04"] }
 esp-backtrace = { version = "0.18.1", features = ["esp32", "panic-handler", "println"] }
 
-xpt2046 = { path = "../xpt2046" }
+xpt2046 = { git = "https://github.com/lampaBiurkowa/xpt2046.git" }
 
 [build-dependencies]
 slint-build = { version = "1.14.1" }

@@ -194,7 +194,6 @@ impl Platform for EspBackend {
                     window.try_dispatch_event(WindowEvent::PointerExited)?;
                 }
             }
-        // xpt.clear_touch();
 
             window.draw_if_needed(|renderer| {
                 renderer.render_by_line(&mut drawbuf);
