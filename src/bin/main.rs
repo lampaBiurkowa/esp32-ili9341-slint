@@ -10,14 +10,15 @@ use core::cell::RefCell;
 use core::ops::Range;
 
 use alloc::string::ToString;
+use embedded_hal_bus::spi::{NoDelay, RefCellDevice};
 use esp_backtrace as _;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use embedded_hal::digital::OutputPin;
+use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_graphics_core::pixelcolor::raw::RawU16;
 use embedded_graphics_core::pixelcolor::Rgb565;
 use esp_hal::gpio::{Input, Level, Output};
-use esp_hal::main;
+use esp_hal::{Blocking, main};
 use esp_hal::peripherals::Peripherals;
 use esp_hal::spi::master::Spi;
 use esp_hal::time::{Instant, Rate};
@@ -65,6 +66,64 @@ where
                 buf.iter().map(|x| Rgb565::from(RawU16::new(x.0)))
             )
             .unwrap();
+    }
+}
+
+struct Touch<'a> {
+    xpt: Xpt2046<RefCellDevice<'a, Spi<'a, Blocking>, Output<'a>, NoDelay>, Input<'a>>,
+    last_pos: Option<slint::PhysicalPosition>,
+}
+
+impl<'a> Touch<'a>
+where
+{
+    fn new<PinTouch: esp_hal::gpio::OutputPin + 'a, PinIRQ2: esp_hal::gpio::InputPin + 'a>(spi: &'a RefCell<Spi<'a, Blocking>>, touch_cs_pin: PinTouch, irq_pin: PinIRQ2) -> Self {
+        let touch_irq_pin = Input::new(irq_pin, Default::default());
+        let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
+        let touch_spi_dev = embedded_hal_bus::spi::RefCellDevice::new_no_delay(spi, touch_cs).unwrap();
+        let mut xpt = Xpt2046::new(touch_spi_dev, touch_irq_pin, xpt2046::Orientation::Landscape);
+        xpt.init(&mut esp_hal::delay::Delay::new()).unwrap();
+        Self {
+            xpt,
+            last_pos: None,
+        }
+    }
+
+    fn update(
+        &mut self,
+        window: &Rc<MinimalSoftwareWindow>,
+        screen_w: i32,
+        screen_h: i32,
+    ) -> Result<(), slint::PlatformError> {
+        self.xpt.run().unwrap();
+
+        if self.xpt.is_touched() {
+            let p = self.xpt.get_touch_point();
+            let x_px = screen_w - 2 * p.x;
+            let y_px = 2 * p.y;
+
+            let pos = slint::PhysicalPosition::new(x_px, y_px);
+            let logical = pos.to_logical(window.scale_factor());
+
+            let event = match self.last_pos.replace(pos) {
+                Some(prev) if prev != pos => WindowEvent::PointerMoved { position: logical },
+                None => WindowEvent::PointerPressed {
+                    position: logical,
+                    button: PointerEventButton::Left,
+                },
+                _ => WindowEvent::PointerMoved { position: logical },
+            };
+
+            window.try_dispatch_event(event)?;
+        } else if let Some(prev) = self.last_pos.take() {
+            window.try_dispatch_event(WindowEvent::PointerReleased {
+                position: prev.to_logical(window.scale_factor()),
+                button: PointerEventButton::Left,
+            })?;
+            window.try_dispatch_event(WindowEvent::PointerExited)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -141,59 +200,11 @@ impl Platform for EspBackend {
         let window = self.window.borrow().clone().unwrap();
         window.set_size(slint::PhysicalSize::new(320, 240));
 
-        let mut uart = Uart::new(peripherals.UART0, Default::default()).unwrap();
-        
-        let touch_cs_pin = peripherals.GPIO33;
-        let touch_irq_pin = Input::new(peripherals.GPIO36, Default::default());
-        let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
-        let touch_spi_dev = embedded_hal_bus::spi::RefCellDevice::new_no_delay(&spi_ref_cell, touch_cs).unwrap();
-
-        let mut xpt = Xpt2046::new(touch_spi_dev, touch_irq_pin, xpt2046::Orientation::Landscape);
-        let mut last_touch: Option<slint::PhysicalPosition> = None;
-        xpt.init(&mut esp_hal::delay::Delay::new()).unwrap();
-        uart.write("hello".as_bytes()).unwrap();
+        // let mut uart = Uart::new(peripherals.UART0, Default::default()).unwrap();
+        let mut xpt = Touch::new(&spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36);
         loop {
             slint::platform::update_timers_and_animations();
-
-            xpt.run().unwrap();
-            if xpt.is_touched() {
-                uart.write("jea".as_bytes()).unwrap();
-                let point = xpt.get_touch_point();
-                let (x_raw, y_raw) = (point.x, point.y);
-                let screen_w: i32 = 320;
-                //let screen_h: i32 = 240;
-
-                let x_px =screen_w - 2 * x_raw;
-                let y_px =  2 *y_raw;
-                let z = x_raw.to_string() + "," + &y_raw.to_string() + "|" + &x_px.to_string() + "," + &y_px.to_string();
-                uart.write(z.as_bytes()).unwrap();
-
-                let pos = slint::PhysicalPosition::new(x_px, y_px);
-
-                let event = if let Some(previous) = last_touch.replace(pos) {
-                    if previous != pos {
-                        WindowEvent::PointerMoved { position: pos.to_logical(window.scale_factor()) }
-                    } else {
-                        WindowEvent::PointerMoved { position: pos.to_logical(window.scale_factor()) }
-                    }
-                } else {
-                    WindowEvent::PointerPressed {
-                        position: pos.to_logical(window.scale_factor()),
-                        button: PointerEventButton::Left,
-                    }
-                };
-
-                window.try_dispatch_event(event)?;
-                
-            } else {
-                if let Some(prev_pos) = last_touch.take() {
-                    window.try_dispatch_event(WindowEvent::PointerReleased {
-                        position: prev_pos.to_logical(window.scale_factor()),
-                        button: PointerEventButton::Left,
-                    })?;
-                    window.try_dispatch_event(WindowEvent::PointerExited)?;
-                }
-            }
+            xpt.update(&window, 320, 240).unwrap();
 
             window.draw_if_needed(|renderer| {
                 renderer.render_by_line(&mut drawbuf);
