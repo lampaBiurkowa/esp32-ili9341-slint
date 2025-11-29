@@ -9,22 +9,24 @@
 use core::cell::RefCell;
 use core::ops::Range;
 
+use alloc::string::ToString;
 use esp_backtrace as _;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use embedded_hal::digital::OutputPin;
 use embedded_graphics_core::pixelcolor::raw::RawU16;
 use embedded_graphics_core::pixelcolor::Rgb565;
-use esp_hal::gpio::{Level, Output};
+use esp_hal::gpio::{Input, Level, Output};
 use esp_hal::main;
 use esp_hal::peripherals::Peripherals;
 use esp_hal::spi::master::Spi;
 use esp_hal::time::{Instant, Rate};
-use log::info;
+use esp_hal::uart::Uart;
 use mipidsi::models::ILI9341Rgb565;
 use mipidsi::options::{ColorOrder, Orientation, Rotation};
-use slint::platform::Platform;
+use slint::platform::{Platform, PointerEventButton, WindowEvent};
 use slint::platform::software_renderer::{LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
+use xpt2046::{Xpt2046};
 
 extern crate alloc;
 
@@ -60,7 +62,7 @@ where
                 line as u16,
                 range.end as u16,
                 line as u16,
-        buf.iter().map(|x| Rgb565::from(RawU16::new(x.0)))
+                buf.iter().map(|x| Rgb565::from(RawU16::new(x.0)))
             )
             .unwrap();
     }
@@ -98,26 +100,30 @@ impl Platform for EspBackend {
         let spi = Spi::<esp_hal::Blocking>::new(
             peripherals.SPI2,
             esp_hal::spi::master::Config::default()
-                .with_frequency(Rate::from_mhz(40))
+                .with_frequency(Rate::from_mhz(2))//40))
                 .with_mode(esp_hal::spi::Mode::_0),
         )
         .unwrap()
         .with_sck(peripherals.GPIO18)
-        .with_mosi(peripherals.GPIO23);
+        .with_mosi(peripherals.GPIO23)
+        .with_miso(peripherals.GPIO19);
 
         // Display pins
         let dc = Output::new(peripherals.GPIO2, Level::Low, Default::default());
         let cs = Output::new(peripherals.GPIO15, Level::Low, Default::default());
         let rst = Output::new(peripherals.GPIO4, Level::Low, Default::default());
+        
+        let spi_ref_cell = RefCell::new(spi);
+        let spi = embedded_hal_bus::spi::RefCellDevice::new_no_delay(&spi_ref_cell, cs).unwrap();
 
         let mut buf512 = [0u8; 512];
         let interface = mipidsi::interface::SpiInterface::new(
-            embedded_hal_bus::spi::ExclusiveDevice::new_no_delay(spi, cs).unwrap(),
+            spi,
             dc,
             &mut buf512,
         );
 
-        let display = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
+        let display: mipidsi::Display<mipidsi::interface::SpiInterface<'_, embedded_hal_bus::spi::RefCellDevice<Spi<'_, esp_hal::Blocking>, Output<'_>, embedded_hal_bus::spi::NoDelay>, Output<'_>>, ILI9341Rgb565, Output<'_>> = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
             .reset_pin(rst)
             .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
             .color_order(ColorOrder::Bgr)
@@ -135,9 +141,60 @@ impl Platform for EspBackend {
         let window = self.window.borrow().clone().unwrap();
         window.set_size(slint::PhysicalSize::new(320, 240));
 
-        // Main loop
+        let mut uart = Uart::new(peripherals.UART0, Default::default()).unwrap();
+        
+        let touch_cs_pin = peripherals.GPIO33;
+        let touch_irq_pin = Input::new(peripherals.GPIO36, Default::default());
+        let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
+        let touch_spi_dev = embedded_hal_bus::spi::RefCellDevice::new_no_delay(&spi_ref_cell, touch_cs).unwrap();
+
+        let mut xpt = Xpt2046::new(touch_spi_dev, touch_irq_pin, xpt2046::Orientation::Landscape);
+        let mut last_touch: Option<slint::PhysicalPosition> = None;
+        xpt.init(&mut esp_hal::delay::Delay::new()).unwrap();
+        uart.write("hello".as_bytes()).unwrap();
         loop {
             slint::platform::update_timers_and_animations();
+
+            xpt.run().unwrap();
+            if xpt.is_touched() {
+                uart.write("jea".as_bytes()).unwrap();
+                let point = xpt.get_touch_point();
+                let (x_raw, y_raw) = (point.x, point.y);
+                let screen_w: i32 = 320;
+                //let screen_h: i32 = 240;
+
+                let x_px =screen_w - 2 * x_raw;
+                let y_px =  2 *y_raw;
+                let z = x_raw.to_string() + "," + &y_raw.to_string() + "|" + &x_px.to_string() + "," + &y_px.to_string();
+                uart.write(z.as_bytes()).unwrap();
+
+                let pos = slint::PhysicalPosition::new(x_px, y_px);
+
+                let event = if let Some(previous) = last_touch.replace(pos) {
+                    if previous != pos {
+                        WindowEvent::PointerMoved { position: pos.to_logical(window.scale_factor()) }
+                    } else {
+                        WindowEvent::PointerMoved { position: pos.to_logical(window.scale_factor()) }
+                    }
+                } else {
+                    WindowEvent::PointerPressed {
+                        position: pos.to_logical(window.scale_factor()),
+                        button: PointerEventButton::Left,
+                    }
+                };
+
+                window.try_dispatch_event(event)?;
+                
+            } else {
+                if let Some(prev_pos) = last_touch.take() {
+                    window.try_dispatch_event(WindowEvent::PointerReleased {
+                        position: prev_pos.to_logical(window.scale_factor()),
+                        button: PointerEventButton::Left,
+                    })?;
+                    window.try_dispatch_event(WindowEvent::PointerExited)?;
+                }
+            }
+        // xpt.clear_touch();
 
             window.draw_if_needed(|renderer| {
                 renderer.render_by_line(&mut drawbuf);
@@ -155,7 +212,6 @@ fn main() -> ! {
     let config = esp_hal::Config::default();
     let peripherals = esp_hal::init(config);
     esp_println::logger::init_logger_from_env();
-    info!("Peripherals initialized");
 
     slint::platform::set_platform(Box::new(EspBackend {
         peripherals: RefCell::new(Some(peripherals)),
