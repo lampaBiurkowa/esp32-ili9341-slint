@@ -9,12 +9,10 @@
 use core::cell::RefCell;
 use core::ops::Range;
 
-use alloc::string::ToString;
 use embedded_hal_bus::spi::{NoDelay, RefCellDevice};
 use esp_backtrace as _;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_graphics_core::pixelcolor::raw::RawU16;
 use embedded_graphics_core::pixelcolor::Rgb565;
 use esp_hal::gpio::{Input, Level, Output};
@@ -22,7 +20,6 @@ use esp_hal::{Blocking, main};
 use esp_hal::peripherals::Peripherals;
 use esp_hal::spi::master::Spi;
 use esp_hal::time::{Instant, Rate};
-use esp_hal::uart::Uart;
 use mipidsi::models::ILI9341Rgb565;
 use mipidsi::options::{ColorOrder, Orientation, Rotation};
 use slint::platform::{Platform, PointerEventButton, WindowEvent};
@@ -37,15 +34,41 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 slint::include_modules!();
 
-struct DrawBuf<'a, Display> {
-    display: Display,
-    buffer: &'a mut [Rgb565Pixel],
+struct DrawBuf<'a> {
+    display: mipidsi::Display<mipidsi::interface::SpiInterface<'a, embedded_hal_bus::spi::RefCellDevice<'a, Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>, Output<'a>>, ILI9341Rgb565, Output<'a>>,
+    buffer: [Rgb565Pixel; 320],
 }
 
-impl<DI, RST> LineBufferProvider for &mut DrawBuf<'_, mipidsi::Display<DI, ILI9341Rgb565, RST>>
-where
-    DI: mipidsi::interface::Interface<Word = u8>,
-    RST: OutputPin<Error = core::convert::Infallible>,
+impl<'a> DrawBuf<'a> {
+    fn new<PinDc: esp_hal::gpio::OutputPin + 'a, PinCs: esp_hal::gpio::OutputPin + 'a, PinRst: esp_hal::gpio::OutputPin + 'a>(spi: &'a RefCell<Spi<'a, Blocking>>, dc_pin: PinDc, cs_pin: PinCs, rst_pin: PinRst, buf512: &'a mut[u8; 512]) -> Self {
+        let dc = Output::new(dc_pin, Level::Low, Default::default());
+        let cs = Output::new(cs_pin, Level::Low, Default::default());
+        let rst = Output::new(rst_pin, Level::Low, Default::default());
+        
+        let spi = embedded_hal_bus::spi::RefCellDevice::new_no_delay(spi, cs).unwrap();
+
+        let interface = mipidsi::interface::SpiInterface::new(
+            spi,
+            dc,
+            buf512,
+        );
+
+        let display: mipidsi::Display<mipidsi::interface::SpiInterface<'_, embedded_hal_bus::spi::RefCellDevice<Spi<'_, esp_hal::Blocking>, Output<'_>, embedded_hal_bus::spi::NoDelay>, Output<'_>>, ILI9341Rgb565, Output<'_>> = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
+            .reset_pin(rst)
+            .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
+            .color_order(ColorOrder::Bgr)
+            .init(&mut esp_hal::delay::Delay::new())
+            .unwrap();
+
+        let linebuf = [Rgb565Pixel(0); 320];
+        Self {
+            display,
+            buffer: linebuf
+        }
+    }
+}
+
+impl LineBufferProvider for &mut DrawBuf<'_>
 {
     type TargetPixel = Rgb565Pixel;
 
@@ -167,34 +190,34 @@ impl Platform for EspBackend {
         .with_mosi(peripherals.GPIO23)
         .with_miso(peripherals.GPIO19);
 
-        // Display pins
-        let dc = Output::new(peripherals.GPIO2, Level::Low, Default::default());
-        let cs = Output::new(peripherals.GPIO15, Level::Low, Default::default());
-        let rst = Output::new(peripherals.GPIO4, Level::Low, Default::default());
+        // // Display pins
+        // let dc = Output::new(peripherals.GPIO2, Level::Low, Default::default());
+        // let cs = Output::new(peripherals.GPIO15, Level::Low, Default::default());
+        // let rst = Output::new(peripherals.GPIO4, Level::Low, Default::default());
         
         let spi_ref_cell = RefCell::new(spi);
-        let spi = embedded_hal_bus::spi::RefCellDevice::new_no_delay(&spi_ref_cell, cs).unwrap();
+        // let spi = embedded_hal_bus::spi::RefCellDevice::new_no_delay(&spi_ref_cell, cs).unwrap();
 
         let mut buf512 = [0u8; 512];
-        let interface = mipidsi::interface::SpiInterface::new(
-            spi,
-            dc,
-            &mut buf512,
-        );
+        // let interface = mipidsi::interface::SpiInterface::new(
+        //     spi,
+        //     dc,
+        //     &mut buf512,
+        // );
 
-        let display: mipidsi::Display<mipidsi::interface::SpiInterface<'_, embedded_hal_bus::spi::RefCellDevice<Spi<'_, esp_hal::Blocking>, Output<'_>, embedded_hal_bus::spi::NoDelay>, Output<'_>>, ILI9341Rgb565, Output<'_>> = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
-            .reset_pin(rst)
-            .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
-            .color_order(ColorOrder::Bgr)
-            .init(&mut esp_hal::delay::Delay::new())
-            .unwrap();
+        // let display: mipidsi::Display<mipidsi::interface::SpiInterface<'_, embedded_hal_bus::spi::RefCellDevice<Spi<'_, esp_hal::Blocking>, Output<'_>, embedded_hal_bus::spi::NoDelay>, Output<'_>>, ILI9341Rgb565, Output<'_>> = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
+        //     .reset_pin(rst)
+        //     .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
+        //     .color_order(ColorOrder::Bgr)
+        //     .init(&mut esp_hal::delay::Delay::new())
+        //     .unwrap();
 
-        // Create the draw buffer
-        let mut linebuf = [Rgb565Pixel(0); 320];
-        let mut drawbuf = DrawBuf {
-            display,
-            buffer: &mut linebuf,
-        };
+        // // Create the draw buffer
+        // let mut linebuf = [Rgb565Pixel(0); 320];
+        let mut drawbuf = DrawBuf::new(&spi_ref_cell, peripherals.GPIO2, peripherals.GPIO15, peripherals.GPIO4, &mut buf512);
+        //     display,
+        //     buffer: &mut linebuf,
+        // };
 
         // Get the Slint window that was created earlier
         let window = self.window.borrow().clone().unwrap();
