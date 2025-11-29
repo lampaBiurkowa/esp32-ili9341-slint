@@ -190,35 +190,10 @@ impl Platform for EspBackend {
         .with_mosi(peripherals.GPIO23)
         .with_miso(peripherals.GPIO19);
 
-        // // Display pins
-        // let dc = Output::new(peripherals.GPIO2, Level::Low, Default::default());
-        // let cs = Output::new(peripherals.GPIO15, Level::Low, Default::default());
-        // let rst = Output::new(peripherals.GPIO4, Level::Low, Default::default());
-        
         let spi_ref_cell = RefCell::new(spi);
-        // let spi = embedded_hal_bus::spi::RefCellDevice::new_no_delay(&spi_ref_cell, cs).unwrap();
-
         let mut buf512 = [0u8; 512];
-        // let interface = mipidsi::interface::SpiInterface::new(
-        //     spi,
-        //     dc,
-        //     &mut buf512,
-        // );
-
-        // let display: mipidsi::Display<mipidsi::interface::SpiInterface<'_, embedded_hal_bus::spi::RefCellDevice<Spi<'_, esp_hal::Blocking>, Output<'_>, embedded_hal_bus::spi::NoDelay>, Output<'_>>, ILI9341Rgb565, Output<'_>> = mipidsi::Builder::new(mipidsi::models::ILI9341Rgb565, interface)
-        //     .reset_pin(rst)
-        //     .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
-        //     .color_order(ColorOrder::Bgr)
-        //     .init(&mut esp_hal::delay::Delay::new())
-        //     .unwrap();
-
-        // // Create the draw buffer
-        // let mut linebuf = [Rgb565Pixel(0); 320];
         let mut drawbuf = DrawBuf::new(&spi_ref_cell, peripherals.GPIO2, peripherals.GPIO15, peripherals.GPIO4, &mut buf512);
-        //     display,
-        //     buffer: &mut linebuf,
-        // };
-
+ 
         // Get the Slint window that was created earlier
         let window = self.window.borrow().clone().unwrap();
         window.set_size(slint::PhysicalSize::new(320, 240));
