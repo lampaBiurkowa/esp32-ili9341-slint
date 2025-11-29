@@ -15,6 +15,7 @@ use alloc::boxed::Box;
 use alloc::rc::Rc;
 use embedded_graphics_core::pixelcolor::raw::RawU16;
 use embedded_graphics_core::pixelcolor::Rgb565;
+use esp_hal::gpio::interconnect::{PeripheralInput, PeripheralOutput};
 use esp_hal::gpio::{Input, Level, Output};
 use esp_hal::{Blocking, main};
 use esp_hal::peripherals::Peripherals;
@@ -40,7 +41,7 @@ struct DrawBuf<'a> {
 }
 
 impl<'a> DrawBuf<'a> {
-    fn new<PinDc: esp_hal::gpio::OutputPin + 'a, PinCs: esp_hal::gpio::OutputPin + 'a, PinRst: esp_hal::gpio::OutputPin + 'a>(spi: &'a RefCell<Spi<'a, Blocking>>, dc_pin: PinDc, cs_pin: PinCs, rst_pin: PinRst, buf512: &'a mut[u8; 512]) -> Self {
+    fn new(spi: &'a RefCell<Spi<'a, Blocking>>, dc_pin: impl esp_hal::gpio::OutputPin + 'a, cs_pin: impl esp_hal::gpio::OutputPin + 'a, rst_pin: impl esp_hal::gpio::OutputPin + 'a, buf512: &'a mut[u8; 512]) -> Self {
         let dc = Output::new(dc_pin, Level::Low, Default::default());
         let cs = Output::new(cs_pin, Level::Low, Default::default());
         let rst = Output::new(rst_pin, Level::Low, Default::default());
@@ -98,9 +99,8 @@ struct Touch<'a> {
 }
 
 impl<'a> Touch<'a>
-where
 {
-    fn new<PinTouch: esp_hal::gpio::OutputPin + 'a, PinIRQ2: esp_hal::gpio::InputPin + 'a>(spi: &'a RefCell<Spi<'a, Blocking>>, touch_cs_pin: PinTouch, irq_pin: PinIRQ2) -> Self {
+    fn new(spi: &'a RefCell<Spi<'a, Blocking>>, touch_cs_pin: impl esp_hal::gpio::OutputPin + 'a, irq_pin: impl esp_hal::gpio::InputPin + 'a) -> Self {
         let touch_irq_pin = Input::new(irq_pin, Default::default());
         let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
         let touch_spi_dev = embedded_hal_bus::spi::RefCellDevice::new_no_delay(spi, touch_cs).unwrap();
@@ -116,7 +116,7 @@ where
         &mut self,
         window: &Rc<MinimalSoftwareWindow>,
         screen_w: i32,
-        screen_h: i32,
+        _screen_h: i32,
     ) -> Result<(), slint::PlatformError> {
         self.xpt.run().unwrap();
 
@@ -164,6 +164,19 @@ impl Default for EspBackend {
     }
 }
 
+fn create_shared_spi<'a>(spi: impl esp_hal::spi::master::Instance + 'a, sck: impl PeripheralOutput<'a>, mosi: impl PeripheralOutput<'a>, miso: impl PeripheralInput<'a>) -> Spi<'a, Blocking>{
+    Spi::<esp_hal::Blocking>::new(
+            spi,
+            esp_hal::spi::master::Config::default()
+                .with_frequency(Rate::from_mhz(2))//40))
+                .with_mode(esp_hal::spi::Mode::_0),
+        )
+        .unwrap()
+        .with_sck(sck)
+        .with_mosi(mosi)
+        .with_miso(miso)
+}
+
 impl Platform for EspBackend {
     fn duration_since_start(&self) -> core::time::Duration {
         core::time::Duration::from_millis(Instant::now().duration_since_epoch().as_millis())
@@ -179,16 +192,7 @@ impl Platform for EspBackend {
 
     fn run_event_loop(&self) -> Result<(), slint::PlatformError> {
         let peripherals = self.peripherals.borrow_mut().take().expect("Peripherals already taken");
-        let spi = Spi::<esp_hal::Blocking>::new(
-            peripherals.SPI2,
-            esp_hal::spi::master::Config::default()
-                .with_frequency(Rate::from_mhz(2))//40))
-                .with_mode(esp_hal::spi::Mode::_0),
-        )
-        .unwrap()
-        .with_sck(peripherals.GPIO18)
-        .with_mosi(peripherals.GPIO23)
-        .with_miso(peripherals.GPIO19);
+        let spi = create_shared_spi(peripherals.SPI2, peripherals.GPIO18, peripherals.GPIO23, peripherals.GPIO19);
 
         let spi_ref_cell = RefCell::new(spi);
         let mut buf512 = [0u8; 512];
