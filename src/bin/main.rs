@@ -6,30 +6,40 @@
     holding buffers for the duration of a data transfer."
 )]
 
-use core::cell::RefCell;
-use core::ops::Range;
-
+use alloc::{boxed::Box, rc::Rc};
+use core::{cell::RefCell, ops::Range};
+use embedded_graphics_core::pixelcolor::{Rgb565, raw::RawU16};
 use embedded_hal_bus::spi::{NoDelay, RefCellDevice};
 use esp_backtrace as _;
-use alloc::boxed::Box;
-use alloc::rc::Rc;
-use embedded_graphics_core::pixelcolor::raw::RawU16;
-use embedded_graphics_core::pixelcolor::Rgb565;
-use esp_hal::delay::Delay;
-use esp_hal::gpio::interconnect::{PeripheralInput, PeripheralOutput};
-use esp_hal::gpio::{Input, Level, Output};
-use esp_hal::{Blocking, main};
-use esp_hal::peripherals::Peripherals;
-use esp_hal::spi::master::Spi;
-use esp_hal::time::{Instant, Rate};
-use mipidsi::Display;
-use mipidsi::interface::SpiInterface;
-use mipidsi::models::ILI9341Rgb565;
-use mipidsi::options::{ColorOrder, Orientation, Rotation};
-use slint::{PhysicalPosition, PhysicalSize, PlatformError};
-use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent, update_timers_and_animations};
-use slint::platform::software_renderer::{LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel};
-use xpt2046::{Xpt2046};
+use esp_hal::{
+    Blocking,
+    delay::Delay,
+    gpio::{
+        Input, Level, Output,
+        interconnect::{PeripheralInput, PeripheralOutput},
+    },
+    main,
+    peripherals::Peripherals,
+    spi::master::Spi,
+    time::{Instant, Rate},
+};
+use mipidsi::{
+    Display,
+    interface::SpiInterface,
+    models::ILI9341Rgb565,
+    options::{ColorOrder, Orientation, Rotation},
+};
+use slint::{
+    PhysicalPosition, PhysicalSize, PlatformError,
+    platform::{
+        Platform, PointerEventButton, WindowAdapter, WindowEvent,
+        software_renderer::{
+            LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel,
+        },
+        update_timers_and_animations,
+    },
+};
+use xpt2046::Xpt2046;
 
 extern crate alloc;
 
@@ -40,23 +50,42 @@ esp_bootloader_esp_idf::esp_app_desc!();
 slint::include_modules!();
 
 struct DrawBuf<'a> {
-    display: Display<SpiInterface<'a, RefCellDevice<'a, Spi<'a, esp_hal::Blocking>, Output<'a>, embedded_hal_bus::spi::NoDelay>, Output<'a>>, ILI9341Rgb565, Output<'a>>,
+    display: Display<
+        SpiInterface<
+            'a,
+            RefCellDevice<
+                'a,
+                Spi<'a, Blocking>,
+                Output<'a>,
+                NoDelay,
+            >,
+            Output<'a>,
+        >,
+        ILI9341Rgb565,
+        Output<'a>,
+    >,
     buffer: [Rgb565Pixel; 320],
 }
 
 impl<'a> DrawBuf<'a> {
-    fn new(spi: &'a RefCell<Spi<'a, Blocking>>, dc_pin: impl esp_hal::gpio::OutputPin + 'a, cs_pin: impl esp_hal::gpio::OutputPin + 'a, rst_pin: impl esp_hal::gpio::OutputPin + 'a, buf512: &'a mut[u8; 512]) -> Self {
+    fn new(
+        spi: &'a RefCell<Spi<'a, Blocking>>,
+        dc_pin: impl esp_hal::gpio::OutputPin + 'a,
+        cs_pin: impl esp_hal::gpio::OutputPin + 'a,
+        rst_pin: impl esp_hal::gpio::OutputPin + 'a,
+        buf512: &'a mut [u8; 512],
+    ) -> Self {
         let dc = Output::new(dc_pin, Level::Low, Default::default());
         let cs = Output::new(cs_pin, Level::Low, Default::default());
         let rst = Output::new(rst_pin, Level::Low, Default::default());
         let spi = RefCellDevice::new_no_delay(spi, cs).unwrap();
-        let interface = SpiInterface::new(
-            spi,
-            dc,
-            buf512,
-        );
+        let interface = SpiInterface::new(spi, dc, buf512);
 
-        let display: Display<SpiInterface<'_, RefCellDevice<Spi<'_, Blocking>, Output<'_>, NoDelay>, Output<'_>>, ILI9341Rgb565, Output<'_>> = mipidsi::Builder::new(ILI9341Rgb565, interface)
+        let display: Display<
+            SpiInterface<'_, RefCellDevice<Spi<'_, Blocking>, Output<'_>, NoDelay>, Output<'_>>,
+            ILI9341Rgb565,
+            Output<'_>,
+        > = mipidsi::Builder::new(ILI9341Rgb565, interface)
             .reset_pin(rst)
             .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
             .color_order(ColorOrder::Bgr)
@@ -66,13 +95,12 @@ impl<'a> DrawBuf<'a> {
         let linebuf = [Rgb565Pixel(0); 320];
         Self {
             display,
-            buffer: linebuf
+            buffer: linebuf,
         }
     }
 }
 
-impl LineBufferProvider for &mut DrawBuf<'_>
-{
+impl LineBufferProvider for &mut DrawBuf<'_> {
     type TargetPixel = Rgb565Pixel;
 
     fn process_line(
@@ -89,7 +117,7 @@ impl LineBufferProvider for &mut DrawBuf<'_>
                 line as u16,
                 range.end as u16,
                 line as u16,
-                buf.iter().map(|x| Rgb565::from(RawU16::new(x.0)))
+                buf.iter().map(|x| Rgb565::from(RawU16::new(x.0))),
             )
             .unwrap();
     }
@@ -100,13 +128,20 @@ struct Touch<'a> {
     last_pos: Option<slint::PhysicalPosition>,
 }
 
-impl<'a> Touch<'a>
-{
-    fn new(spi: &'a RefCell<Spi<'a, Blocking>>, touch_cs_pin: impl esp_hal::gpio::OutputPin + 'a, irq_pin: impl esp_hal::gpio::InputPin + 'a) -> Self {
+impl<'a> Touch<'a> {
+    fn new(
+        spi: &'a RefCell<Spi<'a, Blocking>>,
+        touch_cs_pin: impl esp_hal::gpio::OutputPin + 'a,
+        irq_pin: impl esp_hal::gpio::InputPin + 'a,
+    ) -> Self {
         let touch_irq_pin = Input::new(irq_pin, Default::default());
         let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
         let touch_spi_dev = RefCellDevice::new_no_delay(spi, touch_cs).unwrap();
-        let mut xpt = Xpt2046::new(touch_spi_dev, touch_irq_pin, xpt2046::Orientation::Landscape);
+        let mut xpt = Xpt2046::new(
+            touch_spi_dev,
+            touch_irq_pin,
+            xpt2046::Orientation::Landscape,
+        );
         xpt.init(&mut Delay::new()).unwrap();
         Self {
             xpt,
@@ -161,22 +196,27 @@ impl Default for EspBackend {
     fn default() -> Self {
         Self {
             window: RefCell::new(None),
-            peripherals: RefCell::new(None)
+            peripherals: RefCell::new(None),
         }
     }
 }
 
-fn create_shared_spi<'a>(spi: impl esp_hal::spi::master::Instance + 'a, sck: impl PeripheralOutput<'a>, mosi: impl PeripheralOutput<'a>, miso: impl PeripheralInput<'a>) -> Spi<'a, Blocking>{
+fn create_shared_spi<'a>(
+    spi: impl esp_hal::spi::master::Instance + 'a,
+    sck: impl PeripheralOutput<'a>,
+    mosi: impl PeripheralOutput<'a>,
+    miso: impl PeripheralInput<'a>,
+) -> Spi<'a, Blocking> {
     Spi::<esp_hal::Blocking>::new(
-            spi,
-            esp_hal::spi::master::Config::default()
-                .with_frequency(Rate::from_mhz(2))//40))
-                .with_mode(esp_hal::spi::Mode::_0),
-        )
-        .unwrap()
-        .with_sck(sck)
-        .with_mosi(mosi)
-        .with_miso(miso)
+        spi,
+        esp_hal::spi::master::Config::default()
+            .with_frequency(Rate::from_mhz(2)) //40))
+            .with_mode(esp_hal::spi::Mode::_0),
+    )
+    .unwrap()
+    .with_sck(sck)
+    .with_mosi(mosi)
+    .with_miso(miso)
 }
 
 impl Platform for EspBackend {
@@ -184,23 +224,36 @@ impl Platform for EspBackend {
         core::time::Duration::from_millis(Instant::now().duration_since_epoch().as_millis())
     }
 
-    fn create_window_adapter(
-        &self,
-    ) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+    fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
         let w = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
         self.window.replace(Some(w.clone()));
         Ok(w)
     }
 
     fn run_event_loop(&self) -> Result<(), PlatformError> {
-        let peripherals = self.peripherals.borrow_mut().take().expect("Peripherals already taken");
-        let spi = create_shared_spi(peripherals.SPI2, peripherals.GPIO18, peripherals.GPIO23, peripherals.GPIO19);
+        let peripherals = self
+            .peripherals
+            .borrow_mut()
+            .take()
+            .expect("Peripherals already taken");
+        let spi = create_shared_spi(
+            peripherals.SPI2,
+            peripherals.GPIO18,
+            peripherals.GPIO23,
+            peripherals.GPIO19,
+        );
 
         let spi_ref_cell = RefCell::new(spi);
+
         let mut buf512 = [0u8; 512];
-        let mut drawbuf = DrawBuf::new(&spi_ref_cell, peripherals.GPIO2, peripherals.GPIO15, peripherals.GPIO4, &mut buf512);
- 
-        // Get the Slint window that was created earlier
+        let mut drawbuf = DrawBuf::new(
+            &spi_ref_cell,
+            peripherals.GPIO2,
+            peripherals.GPIO15,
+            peripherals.GPIO4,
+            &mut buf512,
+        );
+
         let window = self.window.borrow().clone().unwrap();
         window.set_size(PhysicalSize::new(320, 240));
 
@@ -218,7 +271,6 @@ impl Platform for EspBackend {
     }
 }
 
-
 #[main]
 fn main() -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98768);
@@ -231,7 +283,7 @@ fn main() -> ! {
         peripherals: RefCell::new(Some(peripherals)),
         window: RefCell::new(None),
     }))
-        .expect("backend already initialized");
+    .expect("backend already initialized");
 
     let app = MainWindow::new().unwrap();
 

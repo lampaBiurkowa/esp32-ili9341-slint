@@ -7,8 +7,9 @@ fn main() {
 
     slint_build::compile_with_config(
         "ui.slint",
-        CompilerConfiguration::new().embed_resources(EmbedResourcesKind::EmbedForSoftwareRenderer))
-        .unwrap();
+        CompilerConfiguration::new().embed_resources(EmbedResourcesKind::EmbedForSoftwareRenderer),
+    )
+    .unwrap();
     println!("cargo:rerun-if-changed=ui.slint");
 }
 
