@@ -40,6 +40,7 @@ use slint::{
     },
 };
 use xpt2046::Xpt2046;
+use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 
 extern crate alloc;
 
@@ -187,6 +188,41 @@ impl<'a> Touch<'a> {
     }
 }
 
+struct DummyTime;
+impl TimeSource for DummyTime {
+    fn get_timestamp(&self) -> Timestamp {
+        Timestamp::from_calendar(2024, 1, 1, 0, 0, 0).unwrap()
+    }
+}
+
+fn init_sd_card<'a>(
+    spi: &'a RefCell<Spi<'a, Blocking>>,
+    sd_cs_pin: impl esp_hal::gpio::OutputPin + 'a,
+) {
+    let sd_cs = Output::new(sd_cs_pin, Level::High, Default::default());
+    let sd_spi_dev = RefCellDevice::new_no_delay(spi, sd_cs).unwrap();
+
+    let sd = SdCard::new(sd_spi_dev, Delay::new());
+    let controller = VolumeManager::new(sd, DummyTime);
+    if let Ok(volume) = controller.open_volume(VolumeIdx(0)) {
+        if let Ok(root) = volume.open_root_dir() {
+            let file_open = root.open_file_in_dir(
+                "HELLO.TXT",
+                Mode::ReadOnly,
+            );
+
+            if let Ok(file) = file_open {
+                let mut buf = [0u8; 64];
+                if let Ok(n) = file.read(&mut buf) {
+                    esp_println::println!("SD: Read {} bytes: {:?}", n, &buf[..n]);
+                }
+            }
+        }
+    } else {
+        esp_println::println!("SD: No volume found");
+    }
+}
+
 struct EspBackend {
     window: RefCell<Option<Rc<MinimalSoftwareWindow>>>,
     peripherals: RefCell<Option<Peripherals>>,
@@ -244,6 +280,8 @@ impl Platform for EspBackend {
         );
 
         let spi_ref_cell = RefCell::new(spi);
+
+        init_sd_card(&spi_ref_cell, peripherals.GPIO5);
 
         let mut buf512 = [0u8; 512];
         let mut drawbuf = DrawBuf::new(
