@@ -204,24 +204,30 @@ fn init_sd_card<'a>(
 
     let sd = SdCard::new(sd_spi_dev, Delay::new());
     let controller = VolumeManager::new(sd, DummyTime);
-    match controller.open_volume(VolumeIdx(0)) {
-        Ok(volume) => {
-            if let Ok(root) = volume.open_root_dir() {
-                let file_open = root.open_file_in_dir(
-                    "HELLO.TXT",
-                    Mode::ReadOnly,
-                );
 
-                if let Ok(file) = file_open {
-                    let mut buf = [0u8; 64];
-                    if let Ok(n) = file.read(&mut buf) {
-                        esp_println::println!("SD: Read {} bytes: {:?}", n, &buf[..n]);
+    let mut attempt = 0;
+    let max_attempts = 5;
+    loop {
+        attempt += 1;
+        match controller.open_volume(VolumeIdx(0)) {
+            Ok(volume) => {
+                if let Ok(root) = volume.open_root_dir() {
+                    if let Ok(file) = root.open_file_in_dir("HELLO.TXT", Mode::ReadOnly) {
+                        let mut buf = [0u8; 64];
+                        if let Ok(n) = file.read(&mut buf) {
+                            esp_println::println!("SD: Read {} bytes: {:?}", n, &buf[..n]);
+                        }
                     }
                 }
+                break;
             }
-        }
-        Err(e) => {
-            esp_println::println!("SD: No volume found {:?}", e);
+            Err(e) => {
+                esp_println::println!("SD: Attempt {}/{} failed: {:?}", attempt, max_attempts, e);
+                if attempt >= max_attempts {
+                    break;
+                }
+                Delay::new().delay_millis(50u32);
+            }
         }
     }
 }
@@ -240,16 +246,17 @@ impl Default for EspBackend {
     }
 }
 
-fn create_shared_spi<'a>(
+fn create_spi<'a>(
     spi: impl esp_hal::spi::master::Instance + 'a,
     sck: impl PeripheralOutput<'a>,
     mosi: impl PeripheralOutput<'a>,
     miso: impl PeripheralInput<'a>,
+    frequency: Rate,
 ) -> Spi<'a, Blocking> {
     Spi::<esp_hal::Blocking>::new(
         spi,
         esp_hal::spi::master::Config::default()
-            .with_frequency(Rate::from_khz(400))
+            .with_frequency(frequency)
             .with_mode(esp_hal::spi::Mode::_0),
     )
     .unwrap()
@@ -270,25 +277,36 @@ impl Platform for EspBackend {
     }
 
     fn run_event_loop(&self) -> Result<(), PlatformError> {
+
         let peripherals = self
             .peripherals
             .borrow_mut()
             .take()
             .expect("Peripherals already taken");
-        let spi = create_shared_spi(
-            peripherals.SPI2,
+        //SD requires 100kHz-400kHz 
+        //Display in order to be fast needs like 40MHz
+        //XPT 2046 can have around 4MHz - it doesn't work on values that are too big
+        let fast_spi = create_spi(
+            peripherals.SPI3,
             peripherals.GPIO18,
             peripherals.GPIO23,
             peripherals.GPIO19,
+            Rate::from_mhz(4)
+        );
+        let slow_spi = create_spi(
+            peripherals.SPI2,
+            peripherals.GPIO14,
+            peripherals.GPIO13,
+            peripherals.GPIO27, //GPIO12 is a bootstrapping pin and doin lotsa trouble on boot
+            Rate::from_khz(400)
         );
 
-        let spi_ref_cell = RefCell::new(spi);
-
-        init_sd_card(&spi_ref_cell, peripherals.GPIO5);
+        let fast_spi_ref_cell = RefCell::new(fast_spi);
+        let slow_spi_ref_cell = RefCell::new(slow_spi);
 
         let mut buf512 = [0u8; 512];
         let mut drawbuf = DrawBuf::new(
-            &spi_ref_cell,
+            &fast_spi_ref_cell,
             peripherals.GPIO2,
             peripherals.GPIO15,
             peripherals.GPIO4,
@@ -299,7 +317,8 @@ impl Platform for EspBackend {
         window.set_size(PhysicalSize::new(320, 240));
 
         // let mut uart = Uart::new(peripherals.UART0, Default::default()).unwrap();
-        let mut xpt = Touch::new(&spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36);
+        let mut xpt = Touch::new(&fast_spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36);
+        init_sd_card(&slow_spi_ref_cell, peripherals.GPIO21);
         loop {
             update_timers_and_animations();
             xpt.update(&window, 320, 240).unwrap();
