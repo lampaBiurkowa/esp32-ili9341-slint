@@ -10,6 +10,7 @@ use alloc::{boxed::Box, rc::Rc};
 use core::{cell::RefCell, ops::Range};
 use embedded_graphics_core::pixelcolor::{Rgb565, raw::RawU16};
 use embedded_hal_bus::spi::{NoDelay, RefCellDevice};
+use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_backtrace as _;
 use esp_hal::{
     Blocking,
@@ -40,7 +41,6 @@ use slint::{
     },
 };
 use xpt2046::Xpt2046;
-use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 
 extern crate alloc;
 
@@ -52,16 +52,7 @@ slint::include_modules!();
 
 struct DrawBuf<'a> {
     display: Display<
-        SpiInterface<
-            'a,
-            RefCellDevice<
-                'a,
-                Spi<'a, Blocking>,
-                Output<'a>,
-                NoDelay,
-            >,
-            Output<'a>,
-        >,
+        SpiInterface<'a, RefCellDevice<'a, Spi<'a, Blocking>, Output<'a>, NoDelay>, Output<'a>>,
         ILI9341Rgb565,
         Output<'a>,
     >,
@@ -277,13 +268,12 @@ impl Platform for EspBackend {
     }
 
     fn run_event_loop(&self) -> Result<(), PlatformError> {
-
         let peripherals = self
             .peripherals
             .borrow_mut()
             .take()
             .expect("Peripherals already taken");
-        //SD requires 100kHz-400kHz 
+        //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz
         //XPT 2046 can have around 4MHz - it doesn't work on values that are too big
         let fast_spi = create_spi(
@@ -291,14 +281,14 @@ impl Platform for EspBackend {
             peripherals.GPIO18,
             peripherals.GPIO23,
             peripherals.GPIO19,
-            Rate::from_mhz(4)
+            Rate::from_mhz(4),
         );
         let slow_spi = create_spi(
             peripherals.SPI2,
             peripherals.GPIO14,
             peripherals.GPIO13,
             peripherals.GPIO27, //GPIO12 is a bootstrapping pin and doin lotsa trouble on boot
-            Rate::from_khz(400)
+            Rate::from_khz(400),
         );
 
         let fast_spi_ref_cell = RefCell::new(fast_spi);
