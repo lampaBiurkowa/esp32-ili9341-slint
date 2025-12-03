@@ -204,22 +204,25 @@ fn init_sd_card<'a>(
 
     let sd = SdCard::new(sd_spi_dev, Delay::new());
     let controller = VolumeManager::new(sd, DummyTime);
-    if let Ok(volume) = controller.open_volume(VolumeIdx(0)) {
-        if let Ok(root) = volume.open_root_dir() {
-            let file_open = root.open_file_in_dir(
-                "HELLO.TXT",
-                Mode::ReadOnly,
-            );
+    match controller.open_volume(VolumeIdx(0)) {
+        Ok(volume) => {
+            if let Ok(root) = volume.open_root_dir() {
+                let file_open = root.open_file_in_dir(
+                    "HELLO.TXT",
+                    Mode::ReadOnly,
+                );
 
-            if let Ok(file) = file_open {
-                let mut buf = [0u8; 64];
-                if let Ok(n) = file.read(&mut buf) {
-                    esp_println::println!("SD: Read {} bytes: {:?}", n, &buf[..n]);
+                if let Ok(file) = file_open {
+                    let mut buf = [0u8; 64];
+                    if let Ok(n) = file.read(&mut buf) {
+                        esp_println::println!("SD: Read {} bytes: {:?}", n, &buf[..n]);
+                    }
                 }
             }
         }
-    } else {
-        esp_println::println!("SD: No volume found");
+        Err(e) => {
+            esp_println::println!("SD: No volume found {:?}", e);
+        }
     }
 }
 
@@ -246,7 +249,7 @@ fn create_shared_spi<'a>(
     Spi::<esp_hal::Blocking>::new(
         spi,
         esp_hal::spi::master::Config::default()
-            .with_frequency(Rate::from_mhz(2)) //40))
+            .with_frequency(Rate::from_khz(400))
             .with_mode(esp_hal::spi::Mode::_0),
     )
     .unwrap()
