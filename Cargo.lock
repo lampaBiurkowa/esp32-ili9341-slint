@@ -4017,6 +4017,7 @@ dependencies = [
  "slint",
  "slint-build",
  "smoltcp",
+ "thiserror 2.0.17",
  "xpt2046",
 ]
 

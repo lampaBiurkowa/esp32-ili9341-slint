@@ -18,7 +18,7 @@ use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManag
 use esp_backtrace as _;
 use esp_hal::{
     Blocking, clock::CpuClock, delay::Delay, gpio::{
-        Input, InputPin, Level, Output, OutputPin, interconnect::{PeripheralInput, PeripheralOutput}
+        Level, Output, OutputPin, interconnect::{PeripheralInput, PeripheralOutput}
     }, main, peripherals::Peripherals, rng::Rng, spi::master::Spi, time::{Duration, Instant, Rate}, timer::timg::TimerGroup
 };
 use mipidsi::{
@@ -37,14 +37,14 @@ use slint::{
         update_timers_and_animations,
     },
 };
-use xpt2046::Xpt2046;
 use embedded_io::{Read, Write};
 
-use crate::secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID};
+use crate::{secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID}, touch_input::{TouchInputProvider, TouchInputResponse, Xpt2046TouchInput}};
 
 extern crate alloc;
 
 mod secrets;
+mod touch_input;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -117,68 +117,39 @@ impl LineBufferProvider for &mut DrawBuf<'_> {
     }
 }
 
-struct Touch<'a> {
-    xpt: Xpt2046<RefCellDevice<'a, Spi<'a, Blocking>, Output<'a>, NoDelay>, Input<'a>>,
-    last_pos: Option<slint::PhysicalPosition>,
-}
-
-impl<'a> Touch<'a> {
-    fn new(
-        spi: &'a RefCell<Spi<'a, Blocking>>,
-        touch_cs_pin: impl OutputPin + 'a,
-        irq_pin: impl InputPin + 'a,
-    ) -> Self {
-        let touch_irq_pin = Input::new(irq_pin, Default::default());
-        let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
-        let touch_spi_dev = RefCellDevice::new_no_delay(spi, touch_cs).unwrap();
-        let mut xpt = Xpt2046::new(
-            touch_spi_dev,
-            touch_irq_pin,
-            xpt2046::Orientation::Landscape,
-        );
-        xpt.init(&mut Delay::new()).unwrap();
-        Self {
-            xpt,
-            last_pos: None,
-        }
-    }
-
-    fn update(
-        &mut self,
-        window: &Rc<MinimalSoftwareWindow>,
-        screen_w: i32,
-        _screen_h: i32,
-    ) -> Result<(), PlatformError> {
-        self.xpt.run().unwrap();
-
-        if self.xpt.is_touched() {
-            let p = self.xpt.get_touch_point();
-            let x_px = screen_w - 2 * p.x;
-            let y_px = 2 * p.y;
-
-            let pos = PhysicalPosition::new(x_px, y_px);
-            let logical = pos.to_logical(window.scale_factor());
-
-            let event = match self.last_pos.replace(pos) {
-                Some(prev) if prev != pos => WindowEvent::PointerMoved { position: logical },
-                None => WindowEvent::PointerPressed {
-                    position: logical,
+fn handle_input(
+    window: &Rc<MinimalSoftwareWindow>,
+    touch_input_provider: &mut impl TouchInputProvider
+) -> Result<(), PlatformError> {
+    if let Ok(x) = touch_input_provider.get_input() {
+        match x {
+            TouchInputResponse::Moved { x, y } => {
+                let pos = PhysicalPosition::new(x, y);
+                let logical = pos.to_logical(window.scale_factor());
+                window.try_dispatch_event(WindowEvent::PointerMoved { position: logical })?;
+            },
+            TouchInputResponse::Pressed { x, y } => {
+                let pos = PhysicalPosition::new(x, y);
+                let logical = pos.to_logical(window.scale_factor());
+                
+                window.try_dispatch_event(WindowEvent::PointerPressed {
+                        position: logical,
+                        button: PointerEventButton::Left,
+                    })?;
+            }
+            TouchInputResponse::Released { x, y } => {
+                let pos = PhysicalPosition::new(x, y);
+                window.try_dispatch_event(WindowEvent::PointerReleased {
+                    position: pos.to_logical(window.scale_factor()),
                     button: PointerEventButton::Left,
-                },
-                _ => WindowEvent::PointerMoved { position: logical },
-            };
-
-            window.try_dispatch_event(event)?;
-        } else if let Some(prev) = self.last_pos.take() {
-            window.try_dispatch_event(WindowEvent::PointerReleased {
-                position: prev.to_logical(window.scale_factor()),
-                button: PointerEventButton::Left,
-            })?;
-            window.try_dispatch_event(WindowEvent::PointerExited)?;
+                })?;
+                window.try_dispatch_event(WindowEvent::PointerExited)?;
+            },
+            TouchInputResponse::NoInput => (),
         }
-
-        Ok(())
     }
+
+    Ok(())
 }
 
 struct DummyTime;
@@ -403,19 +374,15 @@ impl Platform for EspBackend {
                 .expect("Failed to initialize Wi-Fi controller");
 
         let mut device = interfaces.sta;
-
-        // let mut stack = setup_network_stack(device, &mut rng);
         let mut socket_set_entries: [SocketStorage; 3] = Default::default();
         let mut socket_set = SocketSet::new(&mut socket_set_entries[..]);
         let mut dhcp_socket = smoltcp::socket::dhcpv4::Socket::new();
 
-        // we can set a hostname here (or add other DHCP options)
         dhcp_socket.set_outgoing_options(&[DhcpOption {
             kind: 12,
             data: b"implRust",
         }]);
         socket_set.add(dhcp_socket);
-        // sta_socket_set.add(smoltcp::socket::dhcpv4::Socket::new());
 
         let now = || Instant::now().duration_since_epoch().as_millis();
         let mut stack = Stack::new(
@@ -436,7 +403,6 @@ impl Platform for EspBackend {
         let socket = stack.get_socket(&mut rx_buffer, &mut tx_buffer);
     
         http_request(socket);
-
 
         //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz
@@ -471,11 +437,13 @@ impl Platform for EspBackend {
         let window = self.window.borrow().clone().unwrap();
         window.set_size(PhysicalSize::new(320, 240));
 
-        let mut xpt = Touch::new(&fast_spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36);
+        // let mut xpt = Touch::new(&fast_spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36);
+        let mut touch_input = Xpt2046TouchInput::create(&fast_spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36, 320).unwrap();
+        touch_input.init().unwrap();
         init_sd_card(&slow_spi_ref_cell, peripherals.GPIO21);
         loop {
             update_timers_and_animations();
-            xpt.update(&window, 320, 240).unwrap();
+            handle_input(&window, &mut touch_input)?;
 
             window.draw_if_needed(|renderer| {
                 renderer.render_by_line(&mut drawbuf);

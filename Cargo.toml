@@ -41,6 +41,7 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 ] }
 embedded-io = "0.7.1"
 heapless = "0.8.0"
+thiserror =  { version = "2.0.17", default-features = false }
 
 [build-dependencies]
 slint-build = { version = "1.14.1" }
