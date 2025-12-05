@@ -6,23 +6,20 @@
     holding buffers for the duration of a data transfer."
 )]
 
-use alloc::{boxed::Box, rc::Rc};
+use alloc::{boxed::Box, format, rc::Rc};
+use blocking_network_stack::Stack;
+use esp_println::println;
+use esp_radio::wifi::{ClientConfig, ModeConfig, ScanConfig, WifiController};
+use smoltcp::{iface::{SocketSet, SocketStorage}, wire::DhcpOption};
 use core::{cell::RefCell, ops::Range};
 use embedded_graphics_core::pixelcolor::{Rgb565, raw::RawU16};
 use embedded_hal_bus::spi::{NoDelay, RefCellDevice};
 use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_backtrace as _;
 use esp_hal::{
-    Blocking,
-    delay::Delay,
-    gpio::{
-        Input, Level, Output,
-        interconnect::{PeripheralInput, PeripheralOutput},
-    },
-    main,
-    peripherals::Peripherals,
-    spi::master::Spi,
-    time::{Instant, Rate},
+    Blocking, clock::CpuClock, delay::Delay, gpio::{
+        Input, InputPin, Level, Output, OutputPin, interconnect::{PeripheralInput, PeripheralOutput}
+    }, main, peripherals::Peripherals, rng::Rng, spi::master::Spi, time::{Duration, Instant, Rate}, timer::timg::TimerGroup
 };
 use mipidsi::{
     Display,
@@ -41,8 +38,13 @@ use slint::{
     },
 };
 use xpt2046::Xpt2046;
+use embedded_io::{Read, Write};
+
+use crate::secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID};
 
 extern crate alloc;
+
+mod secrets;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -62,9 +64,9 @@ struct DrawBuf<'a> {
 impl<'a> DrawBuf<'a> {
     fn new(
         spi: &'a RefCell<Spi<'a, Blocking>>,
-        dc_pin: impl esp_hal::gpio::OutputPin + 'a,
-        cs_pin: impl esp_hal::gpio::OutputPin + 'a,
-        rst_pin: impl esp_hal::gpio::OutputPin + 'a,
+        dc_pin: impl OutputPin + 'a,
+        cs_pin: impl OutputPin + 'a,
+        rst_pin: impl OutputPin + 'a,
         buf512: &'a mut [u8; 512],
     ) -> Self {
         let dc = Output::new(dc_pin, Level::Low, Default::default());
@@ -123,8 +125,8 @@ struct Touch<'a> {
 impl<'a> Touch<'a> {
     fn new(
         spi: &'a RefCell<Spi<'a, Blocking>>,
-        touch_cs_pin: impl esp_hal::gpio::OutputPin + 'a,
-        irq_pin: impl esp_hal::gpio::InputPin + 'a,
+        touch_cs_pin: impl OutputPin + 'a,
+        irq_pin: impl InputPin + 'a,
     ) -> Self {
         let touch_irq_pin = Input::new(irq_pin, Default::default());
         let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
@@ -188,7 +190,7 @@ impl TimeSource for DummyTime {
 
 fn init_sd_card<'a>(
     spi: &'a RefCell<Spi<'a, Blocking>>,
-    sd_cs_pin: impl esp_hal::gpio::OutputPin + 'a,
+    sd_cs_pin: impl OutputPin + 'a,
 ) {
     let sd_cs = Output::new(sd_cs_pin, Level::High, Default::default());
     let sd_spi_dev = RefCellDevice::new_no_delay(spi, sd_cs).unwrap();
@@ -256,6 +258,121 @@ fn create_spi<'a>(
     .with_miso(miso)
 }
 
+
+pub fn create_interface(device: &mut esp_radio::wifi::WifiDevice) -> smoltcp::iface::Interface {
+    smoltcp::iface::Interface::new(
+        smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ethernet(
+            smoltcp::wire::EthernetAddress::from_bytes(&device.mac_address()),
+        )),
+        device,
+        timestamp(),
+    )
+}
+
+fn timestamp() -> smoltcp::time::Instant {
+    smoltcp::time::Instant::from_micros(
+        esp_hal::time::Instant::now()
+            .duration_since_epoch()
+            .as_micros() as i64,
+    )
+}
+
+fn configure_wifi(controller: &mut WifiController<'_>) {
+    controller
+        .set_power_saving(esp_radio::wifi::PowerSaveMode::None)
+        .unwrap();
+
+    let client_config = ModeConfig::Client(
+        ClientConfig::default()
+            .with_ssid(WIFI_SSID.into())
+            .with_password(WIFI_PASSWORD.into()),
+    );
+    let res = controller.set_config(&client_config);
+    println!("wifi_set_configuration returned {:?}", res);
+
+    controller.start().unwrap();
+    println!("is wifi started: {:?}", controller.is_started());
+}
+
+fn scan_wifi(controller: &mut WifiController<'_>) {
+    println!("Start Wifi Scan");
+    let scan_config = ScanConfig::default().with_max(10);
+    let res = controller.scan_with_config(scan_config).unwrap();
+    for ap in res {
+        println!("{:?}", ap);
+    }
+}
+
+fn connect_wifi(controller: &mut WifiController<'_>) {
+    println!("{:?}", controller.capabilities());
+    println!("wifi_connect {:?}", controller.connect());
+
+    println!("Wait to get connected");
+    loop {
+        match controller.is_connected() {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(err) => panic!("{:?}", err),
+        }
+    }
+    println!("Connected: {:?}", controller.is_connected());
+}
+
+fn obtain_ip(stack: &mut blocking_network_stack::Stack<'_, esp_radio::wifi::WifiDevice<'_>>) {
+    println!("Wait for IP address");
+    loop {
+        stack.work();
+        if stack.is_iface_up() {
+            println!("IP acquired: {:?}", stack.get_ip_info());
+            break;
+        }
+    }
+}
+
+fn http_request(
+    mut socket: blocking_network_stack::Socket<'_, '_, esp_radio::wifi::WifiDevice<'_>>,
+) {
+    println!("Starting HTTP client loop");
+    let delay = Delay::new();
+    println!("Making HTTP request");
+    socket.work();
+
+    let remote_addr = TEST_IP;
+    socket.open(remote_addr, 80).unwrap();
+    let request = format!("GET /api/Tags/tag-crime HTTP/1.1\r\n\
+                    Host: {TEST_ADDRESS}\r\n\
+                    Connection: close\r\n\
+                    User-Agent: esp32-rust\r\n\
+                    \r\n");
+    socket
+        .write(request.as_bytes())
+        .unwrap();
+    socket.flush().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut buffer = [0u8; 512];
+    while let Ok(len) = socket.read(&mut buffer) {
+        let Ok(text) = core::str::from_utf8(&buffer[..len]) else {
+            panic!("Invalid UTF-8 sequence encountered");
+        };
+
+        println!("{}", text);
+
+        if Instant::now() > deadline {
+            println!("Timeout");
+            break;
+        }
+    }
+
+    socket.disconnect();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        socket.work();
+    }
+
+    delay.delay_millis(1000);
+}
+
 impl Platform for EspBackend {
     fn duration_since_start(&self) -> core::time::Duration {
         core::time::Duration::from_millis(Instant::now().duration_since_epoch().as_millis())
@@ -273,6 +390,54 @@ impl Platform for EspBackend {
             .borrow_mut()
             .take()
             .expect("Peripherals already taken");
+
+            
+        let timg0 = TimerGroup::new(peripherals.TIMG0);
+        let rng = Rng::new();
+
+        esp_rtos::start(timg0.timer0);
+        let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
+
+        let (mut wifi_controller, interfaces) =
+            esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
+                .expect("Failed to initialize Wi-Fi controller");
+
+        let mut device = interfaces.sta;
+
+        // let mut stack = setup_network_stack(device, &mut rng);
+        let mut socket_set_entries: [SocketStorage; 3] = Default::default();
+        let mut socket_set = SocketSet::new(&mut socket_set_entries[..]);
+        let mut dhcp_socket = smoltcp::socket::dhcpv4::Socket::new();
+
+        // we can set a hostname here (or add other DHCP options)
+        dhcp_socket.set_outgoing_options(&[DhcpOption {
+            kind: 12,
+            data: b"implRust",
+        }]);
+        socket_set.add(dhcp_socket);
+        // sta_socket_set.add(smoltcp::socket::dhcpv4::Socket::new());
+
+        let now = || Instant::now().duration_since_epoch().as_millis();
+        let mut stack = Stack::new(
+            create_interface(&mut device),
+            device,
+            socket_set,
+            now,
+            rng.random(),
+        );
+
+        configure_wifi(&mut wifi_controller);
+        scan_wifi(&mut wifi_controller);
+        connect_wifi(&mut wifi_controller);
+        obtain_ip(&mut stack);
+
+        let mut rx_buffer = [0u8; 1536];
+        let mut tx_buffer = [0u8; 1536];
+        let socket = stack.get_socket(&mut rx_buffer, &mut tx_buffer);
+    
+        http_request(socket);
+
+
         //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz
         //XPT 2046 can have around 4MHz - it doesn't work on values that are too big
@@ -306,7 +471,6 @@ impl Platform for EspBackend {
         let window = self.window.borrow().clone().unwrap();
         window.set_size(PhysicalSize::new(320, 240));
 
-        // let mut uart = Uart::new(peripherals.UART0, Default::default()).unwrap();
         let mut xpt = Touch::new(&fast_spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36);
         init_sd_card(&slow_spi_ref_cell, peripherals.GPIO21);
         loop {
@@ -325,7 +489,7 @@ impl Platform for EspBackend {
 fn main() -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98768);
 
-    let config = esp_hal::Config::default();
+    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     esp_println::logger::init_logger_from_env();
 
