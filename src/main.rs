@@ -8,42 +8,53 @@
 
 use alloc::{boxed::Box, format, rc::Rc};
 use blocking_network_stack::Stack;
-use esp_println::println;
-use esp_radio::wifi::{ClientConfig, ModeConfig, ScanConfig, WifiController};
-use smoltcp::{iface::{SocketSet, SocketStorage}, wire::DhcpOption};
-use core::{cell::RefCell, ops::Range};
-use embedded_graphics_core::pixelcolor::{Rgb565, raw::RawU16};
-use embedded_hal_bus::spi::{NoDelay, RefCellDevice};
+use core::cell::RefCell;
+use embedded_hal_bus::spi::RefCellDevice;
+use embedded_io::{Read, Write};
 use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_backtrace as _;
 use esp_hal::{
-    Blocking, clock::CpuClock, delay::Delay, gpio::{
-        Level, Output, OutputPin, interconnect::{PeripheralInput, PeripheralOutput}
-    }, main, peripherals::Peripherals, rng::Rng, spi::master::Spi, time::{Duration, Instant, Rate}, timer::timg::TimerGroup
+    Blocking,
+    clock::CpuClock,
+    delay::Delay,
+    gpio::{
+        Level, Output, OutputPin,
+        interconnect::{PeripheralInput, PeripheralOutput},
+    },
+    main,
+    peripherals::Peripherals,
+    rng::Rng,
+    spi::master::Spi,
+    time::{Duration, Instant, Rate},
+    timer::timg::TimerGroup,
 };
-use mipidsi::{
-    Display,
-    interface::SpiInterface,
-    models::ILI9341Rgb565,
-    options::{ColorOrder, Orientation, Rotation},
-};
+use esp_println::println;
+use esp_radio::wifi::{ClientConfig, ModeConfig, ScanConfig, WifiController};
 use slint::{
     PhysicalPosition, PhysicalSize, PlatformError,
     platform::{
         Platform, PointerEventButton, WindowAdapter, WindowEvent,
-        software_renderer::{
-            LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel,
-        },
+        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
         update_timers_and_animations,
     },
 };
-use embedded_io::{Read, Write};
+use smoltcp::{
+    iface::{SocketSet, SocketStorage},
+    wire::DhcpOption,
+};
 
-use crate::{secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID}, touch_input::{TouchInputProvider, TouchInputResponse, Xpt2046TouchInput}};
+use crate::{
+    display_screen::init_ili9341_display,
+    secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID},
+    slint_renderer::SlintRenderer,
+    touch_input::{TouchInputProvider, TouchInputResponse, Xpt2046TouchInput},
+};
 
 extern crate alloc;
 
+mod display_screen;
 mod secrets;
+mod slint_renderer;
 mod touch_input;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
@@ -52,99 +63,30 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 slint::include_modules!();
 
-struct DrawBuf<'a> {
-    display: Display<
-        SpiInterface<'a, RefCellDevice<'a, Spi<'a, Blocking>, Output<'a>, NoDelay>, Output<'a>>,
-        ILI9341Rgb565,
-        Output<'a>,
-    >,
-    buffer: [Rgb565Pixel; 320],
-}
-
-impl<'a> DrawBuf<'a> {
-    fn new(
-        spi: &'a RefCell<Spi<'a, Blocking>>,
-        dc_pin: impl OutputPin + 'a,
-        cs_pin: impl OutputPin + 'a,
-        rst_pin: impl OutputPin + 'a,
-        buf512: &'a mut [u8; 512],
-    ) -> Self {
-        let dc = Output::new(dc_pin, Level::Low, Default::default());
-        let cs = Output::new(cs_pin, Level::Low, Default::default());
-        let rst = Output::new(rst_pin, Level::Low, Default::default());
-        let spi = RefCellDevice::new_no_delay(spi, cs).unwrap();
-        let interface = SpiInterface::new(spi, dc, buf512);
-
-        let display: Display<
-            SpiInterface<'_, RefCellDevice<Spi<'_, Blocking>, Output<'_>, NoDelay>, Output<'_>>,
-            ILI9341Rgb565,
-            Output<'_>,
-        > = mipidsi::Builder::new(ILI9341Rgb565, interface)
-            .reset_pin(rst)
-            .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
-            .color_order(ColorOrder::Bgr)
-            .init(&mut Delay::new())
-            .unwrap();
-
-        let linebuf = [Rgb565Pixel(0); 320];
-        Self {
-            display,
-            buffer: linebuf,
-        }
-    }
-}
-
-impl LineBufferProvider for &mut DrawBuf<'_> {
-    type TargetPixel = Rgb565Pixel;
-
-    fn process_line(
-        &mut self,
-        line: usize,
-        range: Range<usize>,
-        render_fn: impl FnOnce(&mut [Rgb565Pixel]),
-    ) {
-        let buf = &mut self.buffer[range.clone()];
-        render_fn(buf);
-        self.display
-            .set_pixels(
-                range.start as u16,
-                line as u16,
-                range.end as u16,
-                line as u16,
-                buf.iter().map(|x| Rgb565::from(RawU16::new(x.0))),
-            )
-            .unwrap();
-    }
-}
-
 fn handle_input(
     window: &Rc<MinimalSoftwareWindow>,
-    touch_input_provider: &mut impl TouchInputProvider
+    touch_input_provider: &mut impl TouchInputProvider,
 ) -> Result<(), PlatformError> {
     if let Ok(x) = touch_input_provider.get_input() {
         match x {
             TouchInputResponse::Moved { x, y } => {
-                let pos = PhysicalPosition::new(x, y);
-                let logical = pos.to_logical(window.scale_factor());
+                let logical = PhysicalPosition::new(x, y).to_logical(window.scale_factor());
                 window.try_dispatch_event(WindowEvent::PointerMoved { position: logical })?;
-            },
+            }
             TouchInputResponse::Pressed { x, y } => {
-                let pos = PhysicalPosition::new(x, y);
-                let logical = pos.to_logical(window.scale_factor());
-                
+                let logical = PhysicalPosition::new(x, y).to_logical(window.scale_factor());
                 window.try_dispatch_event(WindowEvent::PointerPressed {
-                        position: logical,
-                        button: PointerEventButton::Left,
-                    })?;
+                    position: logical,
+                    button: PointerEventButton::Left,
+                })?;
             }
             TouchInputResponse::Released { x, y } => {
-                let pos = PhysicalPosition::new(x, y);
                 window.try_dispatch_event(WindowEvent::PointerReleased {
-                    position: pos.to_logical(window.scale_factor()),
+                    position: PhysicalPosition::new(x, y).to_logical(window.scale_factor()),
                     button: PointerEventButton::Left,
                 })?;
                 window.try_dispatch_event(WindowEvent::PointerExited)?;
-            },
+            }
             TouchInputResponse::NoInput => (),
         }
     }
@@ -159,10 +101,7 @@ impl TimeSource for DummyTime {
     }
 }
 
-fn init_sd_card<'a>(
-    spi: &'a RefCell<Spi<'a, Blocking>>,
-    sd_cs_pin: impl OutputPin + 'a,
-) {
+fn init_sd_card<'a>(spi: &'a RefCell<Spi<'a, Blocking>>, sd_cs_pin: impl OutputPin + 'a) {
     let sd_cs = Output::new(sd_cs_pin, Level::High, Default::default());
     let sd_spi_dev = RefCellDevice::new_no_delay(spi, sd_cs).unwrap();
 
@@ -228,7 +167,6 @@ fn create_spi<'a>(
     .with_mosi(mosi)
     .with_miso(miso)
 }
-
 
 pub fn create_interface(device: &mut esp_radio::wifi::WifiDevice) -> smoltcp::iface::Interface {
     smoltcp::iface::Interface::new(
@@ -310,14 +248,14 @@ fn http_request(
 
     let remote_addr = TEST_IP;
     socket.open(remote_addr, 80).unwrap();
-    let request = format!("GET /api/Tags/tag-crime HTTP/1.1\r\n\
+    let request = format!(
+        "GET /api/Tags/tag-crime HTTP/1.1\r\n\
                     Host: {TEST_ADDRESS}\r\n\
                     Connection: close\r\n\
                     User-Agent: esp32-rust\r\n\
-                    \r\n");
-    socket
-        .write(request.as_bytes())
-        .unwrap();
+                    \r\n"
+    );
+    socket.write(request.as_bytes()).unwrap();
     socket.flush().unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -362,7 +300,6 @@ impl Platform for EspBackend {
             .take()
             .expect("Peripherals already taken");
 
-            
         let timg0 = TimerGroup::new(peripherals.TIMG0);
         let rng = Rng::new();
 
@@ -401,7 +338,7 @@ impl Platform for EspBackend {
         let mut rx_buffer = [0u8; 1536];
         let mut tx_buffer = [0u8; 1536];
         let socket = stack.get_socket(&mut rx_buffer, &mut tx_buffer);
-    
+
         http_request(socket);
 
         //SD requires 100kHz-400kHz
@@ -426,19 +363,26 @@ impl Platform for EspBackend {
         let slow_spi_ref_cell = RefCell::new(slow_spi);
 
         let mut buf512 = [0u8; 512];
-        let mut drawbuf = DrawBuf::new(
+        let display = init_ili9341_display(
             &fast_spi_ref_cell,
             peripherals.GPIO2,
             peripherals.GPIO15,
             peripherals.GPIO4,
             &mut buf512,
-        );
+        )
+        .unwrap();
+        let mut slint_renderer = SlintRenderer::new(display);
 
         let window = self.window.borrow().clone().unwrap();
         window.set_size(PhysicalSize::new(320, 240));
 
-        // let mut xpt = Touch::new(&fast_spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36);
-        let mut touch_input = Xpt2046TouchInput::create(&fast_spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36, 320).unwrap();
+        let mut touch_input = Xpt2046TouchInput::create(
+            &fast_spi_ref_cell,
+            peripherals.GPIO33,
+            peripherals.GPIO36,
+            320,
+        )
+        .unwrap();
         touch_input.init().unwrap();
         init_sd_card(&slow_spi_ref_cell, peripherals.GPIO21);
         loop {
@@ -446,7 +390,7 @@ impl Platform for EspBackend {
             handle_input(&window, &mut touch_input)?;
 
             window.draw_if_needed(|renderer| {
-                renderer.render_by_line(&mut drawbuf);
+                renderer.render_by_line(&mut slint_renderer);
             });
             window.request_redraw();
         }

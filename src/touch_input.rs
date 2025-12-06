@@ -1,7 +1,12 @@
-use core::cell::RefCell;
 use alloc::string::{String, ToString};
+use core::cell::RefCell;
 use embedded_hal_bus::spi::{NoDelay, RefCellDevice};
-use esp_hal::{Blocking, delay::Delay, gpio::{Input, InputPin, Level, Output, OutputPin}, spi::master::Spi};
+use esp_hal::{
+    Blocking,
+    delay::Delay,
+    gpio::{Input, InputPin, Level, Output, OutputPin},
+    spi::master::Spi,
+};
 use thiserror::Error;
 use xpt2046::Xpt2046;
 
@@ -15,11 +20,11 @@ pub(crate) enum TouchInputError {
     AcquireInputData,
 }
 
-pub(crate) enum TouchInputResponse{
+pub(crate) enum TouchInputResponse {
     Moved { x: i32, y: i32 },
     Pressed { x: i32, y: i32 },
     Released { x: i32, y: i32 },
-    NoInput
+    NoInput,
 }
 
 pub(crate) trait TouchInputProvider {
@@ -29,7 +34,7 @@ pub(crate) trait TouchInputProvider {
 pub(crate) struct Xpt2046TouchInput<'a> {
     driver: Xpt2046<RefCellDevice<'a, Spi<'a, Blocking>, Output<'a>, NoDelay>, Input<'a>>,
     last_pos: Option<(i32, i32)>,
-    screen_width: i32
+    screen_width: i32,
 }
 
 impl<'a> Xpt2046TouchInput<'a> {
@@ -37,11 +42,12 @@ impl<'a> Xpt2046TouchInput<'a> {
         spi: &'a RefCell<Spi<'a, Blocking>>,
         touch_cs_pin: impl OutputPin + 'a,
         irq_pin: impl InputPin + 'a,
-        screen_width: i32
+        screen_width: i32,
     ) -> Result<Self, TouchInputError> {
         let touch_irq_pin = Input::new(irq_pin, Default::default());
         let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
-        let touch_spi_dev = RefCellDevice::new_no_delay(spi, touch_cs).map_err(|e| TouchInputError::SpiInit(e.to_string()))?;
+        let touch_spi_dev = RefCellDevice::new_no_delay(spi, touch_cs)
+            .map_err(|e| TouchInputError::SpiInit(e.to_string()))?;
         let xpt = Xpt2046::new(
             touch_spi_dev,
             touch_irq_pin,
@@ -50,18 +56,22 @@ impl<'a> Xpt2046TouchInput<'a> {
         Ok(Self {
             driver: xpt,
             last_pos: None,
-            screen_width
+            screen_width,
         })
     }
 
     pub(crate) fn init(&mut self) -> Result<(), TouchInputError> {
-        self.driver.init(&mut Delay::new()).map_err(|_| TouchInputError::Xpt2046Init)
+        self.driver
+            .init(&mut Delay::new())
+            .map_err(|_| TouchInputError::Xpt2046Init)
     }
 }
 
 impl<'a> TouchInputProvider for Xpt2046TouchInput<'a> {
     fn get_input(&mut self) -> Result<TouchInputResponse, TouchInputError> {
-        self.driver.run().map_err(|_| TouchInputError::AcquireInputData)?;
+        self.driver
+            .run()
+            .map_err(|_| TouchInputError::AcquireInputData)?;
 
         if self.driver.is_touched() {
             let p = self.driver.get_touch_point();
@@ -69,12 +79,17 @@ impl<'a> TouchInputProvider for Xpt2046TouchInput<'a> {
             let y = 2 * p.y;
 
             match self.last_pos.replace((x, y)) {
-                Some(prev) if (prev.0 != x && prev.1 != y) => Ok(TouchInputResponse::Moved { x, y }),
+                Some(prev) if (prev.0 != x && prev.1 != y) => {
+                    Ok(TouchInputResponse::Moved { x, y })
+                }
                 None => Ok(TouchInputResponse::Pressed { x, y }),
-                _ => Ok(TouchInputResponse::Moved { x, y })
+                _ => Ok(TouchInputResponse::Moved { x, y }),
             }
         } else if let Some(prev) = self.last_pos.take() {
-            Ok(TouchInputResponse::Released { x: prev.0, y: prev.1 })
+            Ok(TouchInputResponse::Released {
+                x: prev.0,
+                y: prev.1,
+            })
         } else {
             Ok(TouchInputResponse::NoInput)
         }
