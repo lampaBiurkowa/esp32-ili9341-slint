@@ -6,11 +6,9 @@
     holding buffers for the duration of a data transfer."
 )]
 
-use alloc::{boxed::Box, format, rc::Rc};
-use blocking_network_stack::Stack;
+use alloc::{boxed::Box, rc::Rc};
 use core::cell::RefCell;
 use embedded_hal_bus::spi::RefCellDevice;
-use embedded_io::{Read, Write};
 use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_backtrace as _;
 use esp_hal::{
@@ -25,11 +23,10 @@ use esp_hal::{
     peripherals::Peripherals,
     rng::Rng,
     spi::master::Spi,
-    time::{Duration, Instant, Rate},
+    time::{Instant, Rate},
     timer::timg::TimerGroup,
 };
 use esp_println::println;
-use esp_radio::wifi::{ClientConfig, ModeConfig, ScanConfig, WifiController};
 use slint::{
     PhysicalPosition, PhysicalSize, PlatformError,
     platform::{
@@ -38,16 +35,10 @@ use slint::{
         update_timers_and_animations,
     },
 };
-use smoltcp::{
-    iface::{SocketSet, SocketStorage},
-    wire::DhcpOption,
-};
+use smoltcp::iface::SocketStorage;
 
 use crate::{
-    display_screen::init_ili9341_display,
-    secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID},
-    slint_renderer::SlintRenderer,
-    touch_input::{TouchInputProvider, TouchInputResponse, Xpt2046TouchInput},
+    display_screen::init_ili9341_display, http_client::{HttpClient, Method}, secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID}, slint_renderer::SlintRenderer, touch_input::{TouchInputProvider, TouchInputResponse, Xpt2046TouchInput}, wifi::{Wifi, obtain_ip}
 };
 
 extern crate alloc;
@@ -56,6 +47,8 @@ mod display_screen;
 mod secrets;
 mod slint_renderer;
 mod touch_input;
+mod wifi;
+mod http_client;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -168,120 +161,6 @@ fn create_spi<'a>(
     .with_miso(miso)
 }
 
-pub fn create_interface(device: &mut esp_radio::wifi::WifiDevice) -> smoltcp::iface::Interface {
-    smoltcp::iface::Interface::new(
-        smoltcp::iface::Config::new(smoltcp::wire::HardwareAddress::Ethernet(
-            smoltcp::wire::EthernetAddress::from_bytes(&device.mac_address()),
-        )),
-        device,
-        timestamp(),
-    )
-}
-
-fn timestamp() -> smoltcp::time::Instant {
-    smoltcp::time::Instant::from_micros(
-        esp_hal::time::Instant::now()
-            .duration_since_epoch()
-            .as_micros() as i64,
-    )
-}
-
-fn configure_wifi(controller: &mut WifiController<'_>) {
-    controller
-        .set_power_saving(esp_radio::wifi::PowerSaveMode::None)
-        .unwrap();
-
-    let client_config = ModeConfig::Client(
-        ClientConfig::default()
-            .with_ssid(WIFI_SSID.into())
-            .with_password(WIFI_PASSWORD.into()),
-    );
-    let res = controller.set_config(&client_config);
-    println!("wifi_set_configuration returned {:?}", res);
-
-    controller.start().unwrap();
-    println!("is wifi started: {:?}", controller.is_started());
-}
-
-fn scan_wifi(controller: &mut WifiController<'_>) {
-    println!("Start Wifi Scan");
-    let scan_config = ScanConfig::default().with_max(10);
-    let res = controller.scan_with_config(scan_config).unwrap();
-    for ap in res {
-        println!("{:?}", ap);
-    }
-}
-
-fn connect_wifi(controller: &mut WifiController<'_>) {
-    println!("{:?}", controller.capabilities());
-    println!("wifi_connect {:?}", controller.connect());
-
-    println!("Wait to get connected");
-    loop {
-        match controller.is_connected() {
-            Ok(true) => break,
-            Ok(false) => {}
-            Err(err) => panic!("{:?}", err),
-        }
-    }
-    println!("Connected: {:?}", controller.is_connected());
-}
-
-fn obtain_ip(stack: &mut blocking_network_stack::Stack<'_, esp_radio::wifi::WifiDevice<'_>>) {
-    println!("Wait for IP address");
-    loop {
-        stack.work();
-        if stack.is_iface_up() {
-            println!("IP acquired: {:?}", stack.get_ip_info());
-            break;
-        }
-    }
-}
-
-fn http_request(
-    mut socket: blocking_network_stack::Socket<'_, '_, esp_radio::wifi::WifiDevice<'_>>,
-) {
-    println!("Starting HTTP client loop");
-    let delay = Delay::new();
-    println!("Making HTTP request");
-    socket.work();
-
-    let remote_addr = TEST_IP;
-    socket.open(remote_addr, 80).unwrap();
-    let request = format!(
-        "GET /api/Tags/tag-crime HTTP/1.1\r\n\
-                    Host: {TEST_ADDRESS}\r\n\
-                    Connection: close\r\n\
-                    User-Agent: esp32-rust\r\n\
-                    \r\n"
-    );
-    socket.write(request.as_bytes()).unwrap();
-    socket.flush().unwrap();
-
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let mut buffer = [0u8; 512];
-    while let Ok(len) = socket.read(&mut buffer) {
-        let Ok(text) = core::str::from_utf8(&buffer[..len]) else {
-            panic!("Invalid UTF-8 sequence encountered");
-        };
-
-        println!("{}", text);
-
-        if Instant::now() > deadline {
-            println!("Timeout");
-            break;
-        }
-    }
-
-    socket.disconnect();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        socket.work();
-    }
-
-    delay.delay_millis(1000);
-}
-
 impl Platform for EspBackend {
     fn duration_since_start(&self) -> core::time::Duration {
         core::time::Duration::from_millis(Instant::now().duration_since_epoch().as_millis())
@@ -302,44 +181,42 @@ impl Platform for EspBackend {
 
         let timg0 = TimerGroup::new(peripherals.TIMG0);
         let rng = Rng::new();
-
         esp_rtos::start(timg0.timer0);
-        let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
 
-        let (mut wifi_controller, interfaces) =
-            esp_radio::wifi::new(&radio_init, peripherals.WIFI, Default::default())
-                .expect("Failed to initialize Wi-Fi controller");
-
-        let mut device = interfaces.sta;
-        let mut socket_set_entries: [SocketStorage; 3] = Default::default();
-        let mut socket_set = SocketSet::new(&mut socket_set_entries[..]);
-        let mut dhcp_socket = smoltcp::socket::dhcpv4::Socket::new();
-
-        dhcp_socket.set_outgoing_options(&[DhcpOption {
-            kind: 12,
-            data: b"implRust",
-        }]);
-        socket_set.add(dhcp_socket);
-
-        let now = || Instant::now().duration_since_epoch().as_millis();
-        let mut stack = Stack::new(
-            create_interface(&mut device),
-            device,
-            socket_set,
-            now,
-            rng.random(),
+        let radio_init = esp_radio::init().unwrap();
+        let mut wifi = Wifi::new(
+            peripherals.WIFI,
+            &radio_init,
+            WIFI_SSID,
+            WIFI_PASSWORD,
         );
 
-        configure_wifi(&mut wifi_controller);
-        scan_wifi(&mut wifi_controller);
-        connect_wifi(&mut wifi_controller);
+        wifi.start();
+        wifi.scan();
+        wifi.connect();
+
+        let device = wifi.interfaces.sta;
+
+        let mut sockets_buf: [SocketStorage; 4] = Default::default();
+        let mut stack = wifi::build_stack(device, &mut sockets_buf, || Instant::now().duration_since_epoch().as_millis(), rng.random());
         obtain_ip(&mut stack);
 
         let mut rx_buffer = [0u8; 1536];
         let mut tx_buffer = [0u8; 1536];
-        let socket = stack.get_socket(&mut rx_buffer, &mut tx_buffer);
-
-        http_request(socket);
+        let mut http = HttpClient::new(
+            &mut stack,
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let response = http.request(
+            Method::Get,
+            "/api/Tags/tag-crime",
+            &mut rx_buffer,
+            &mut tx_buffer,
+            None,
+            10,
+        ).unwrap();
+        println!("{}", response);
 
         //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz
