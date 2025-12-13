@@ -6,13 +6,13 @@ use smoltcp::{
     wire::{DhcpOption, EthernetAddress, HardwareAddress},
 };
 
-pub struct Wifi<'a> {
-    pub controller: WifiController<'a>,
-    pub interfaces: Interfaces<'a>,
+pub(crate) struct Wifi<'a> {
+    controller: WifiController<'a>,
+    pub(crate) interfaces: Interfaces<'a>,
 }
 
 impl<'a> Wifi<'a> {
-    pub fn new(
+    pub(crate) fn new(
         wifi: esp_hal::peripherals::WIFI<'a>,
         radio: &'a esp_radio::Controller,
         ssid: &str,
@@ -33,11 +33,17 @@ impl<'a> Wifi<'a> {
         Self { controller, interfaces }
     }
 
-    pub fn start(&mut self) {
+    pub(crate) fn initialize(&mut self) {
+        self.start();
+        self.scan();
+        self.connect();
+    }
+
+    fn start(&mut self) {
         self.controller.start().unwrap();
     }
 
-    pub fn scan(&mut self) {
+    fn scan(&mut self) {
         let cfg = ScanConfig::default().with_max(10);
         let res = self.controller.scan_with_config(cfg).unwrap();
         for ap in res {
@@ -45,7 +51,7 @@ impl<'a> Wifi<'a> {
         }
     }
 
-    pub fn connect(&mut self) {
+    fn connect(&mut self) {
         self.controller.connect().unwrap();
         loop {
             match self.controller.is_connected() {
@@ -58,7 +64,6 @@ impl<'a> Wifi<'a> {
     }
 }
 
-/// Create a smoltcp Interface from a device (keeps same lifetimes).
 pub fn create_interface(device: &mut WifiDevice) -> Interface {
     Interface::new(
         smoltcp::iface::Config::new(HardwareAddress::Ethernet(
@@ -105,7 +110,7 @@ pub fn build_stack<'a>(
     Stack::new(iface, device, sockets, now_fn, rng_seed)
 }
 
-pub fn obtain_ip(stack: &mut Stack<'_, WifiDevice<'_>>) {
+pub fn obtain_ip(stack: &Stack<'_, WifiDevice<'_>>) {
     esp_println::println!("Wait for IP address");
     loop {
         stack.work();

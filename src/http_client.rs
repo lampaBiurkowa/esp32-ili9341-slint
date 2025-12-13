@@ -1,4 +1,4 @@
-use alloc::string::String;
+use alloc::{rc::Rc, string::String};
 use alloc::format;
 use blocking_network_stack::Stack;
 use embedded_io::{Read, Write};
@@ -29,32 +29,32 @@ impl Method {
 }
 
 pub struct HttpClient<'a> {
-    pub stack: &'a mut Stack<'a, WifiDevice<'a>>,
-    pub host: &'a str,
+    pub stack: Rc<Stack<'a, WifiDevice<'a>>>,
+    pub host: &'static str,
     pub ip: IpAddress,
+    rx_buf: [u8; 1536],
+    tx_buf: [u8; 1536],
 }
 
 impl<'a> HttpClient<'a> {
     pub fn new(
-        stack: &'a mut Stack<'a, WifiDevice<'a>>,
-        host: &'a str,
+        stack: Rc<Stack<'a, WifiDevice<'a>>>,
+        host: &'static str,
         ip: IpAddress,
     ) -> Self {
-        Self { stack, host, ip }
+        Self { stack, host, ip, tx_buf: [0u8; 1536], rx_buf: [0u8; 1536] }
     }
 
     pub fn request(
-        &mut self,
+        &'a mut self,
         method: Method,
         route: &str,
-        rx_buf: &'a mut [u8],
-        tx_buf: &'a mut [u8],
         body: Option<&[u8]>,
         timeout_secs: u64,
     ) -> Result<String, &'static str> {
-        let mut socket = self.stack.get_socket(rx_buf, tx_buf);
+        let mut out = String::new();
+        let mut socket = self.stack.get_socket(&mut self.rx_buf, &mut self.tx_buf);
         socket.work();
-
         socket.open(self.ip, 80).map_err(|_| "open failed")?;
 
         let method_str = method.as_str();
@@ -71,9 +71,7 @@ impl<'a> HttpClient<'a> {
             request.push_str(&format!("Content-Length: {}\r\n", body_len));
             request.push_str("Content-Type: application/json\r\n");
         }
-
         request.push_str("Connection: close\r\n\r\n");
-
         socket.write(request.as_bytes()).map_err(|_| "write failed")?;
 
         if let Some(bytes) = body {
@@ -81,9 +79,7 @@ impl<'a> HttpClient<'a> {
         }
 
         socket.flush().map_err(|_| "flush failed")?;
-
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-        let mut out = String::new();
         let mut temp = [0u8; 256];
 
         loop {

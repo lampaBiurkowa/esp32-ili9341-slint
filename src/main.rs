@@ -184,39 +184,85 @@ impl Platform for EspBackend {
         esp_rtos::start(timg0.timer0);
 
         let radio_init = esp_radio::init().unwrap();
+        let mut sockets_buf: [SocketStorage; 4] = Default::default();
         let mut wifi = Wifi::new(
             peripherals.WIFI,
             &radio_init,
             WIFI_SSID,
             WIFI_PASSWORD,
         );
-
-        wifi.start();
-        wifi.scan();
-        wifi.connect();
-
-        let device = wifi.interfaces.sta;
-
-        let mut sockets_buf: [SocketStorage; 4] = Default::default();
-        let mut stack = wifi::build_stack(device, &mut sockets_buf, || Instant::now().duration_since_epoch().as_millis(), rng.random());
+        wifi.initialize();
+        let mut stack = Rc::new(wifi::build_stack(wifi.interfaces.sta, &mut sockets_buf, || Instant::now().duration_since_epoch().as_millis(), rng.random()));
         obtain_ip(&mut stack);
 
-        let mut rx_buffer = [0u8; 1536];
-        let mut tx_buffer = [0u8; 1536];
         let mut http = HttpClient::new(
-            &mut stack,
+            stack.clone(),
             TEST_ADDRESS,
             TEST_IP,
         );
         let response = http.request(
             Method::Get,
             "/api/Tags/tag-crime",
-            &mut rx_buffer,
-            &mut tx_buffer,
             None,
             10,
         ).unwrap();
         println!("{}", response);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let response = http.request(
+            Method::Delete,
+            "/api/Tags/tag-crime",
+            None,
+            10,
+        ).unwrap();
+        println!("{}", response);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(
+            Method::Post,
+            "/api/Tags/tag-crime",
+            Some(body),
+            10,
+        )?;
+        println!("{}", response);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(
+            Method::Put,
+            "/api/Tags/tag-crime",
+            Some(body),
+            10,
+        )?;
+        println!("{}", response);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(
+            Method::Patch,
+            "/api/Tags/tag-crime",
+            Some(body),
+            10,
+        )?;
+        println!("{}", response);
+
 
         //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz
