@@ -36,19 +36,6 @@ pub struct HttpClient<'a> {
     tx_buf: [u8; 1536],
 }
 
-
-
-fn do_request(
-        client: &'a mut HttpClient<'a>,
-        method: Method,
-        route: &str,
-        body: Option<&[u8]>,
-        timeout_secs: u64) {
-    let mut rx_buf = [0u8; 1536];
-    let mut tx_buf = [0u8; 1536];
-    let response = client.request(method, route, body, timeout_secs, &mut rx_buf, &mut tx_buf).unwrap();
-}
-
 impl<'a> HttpClient<'a> {
     pub fn new(
         stack: Rc<Stack<'a, WifiDevice<'a>>>,
@@ -58,17 +45,15 @@ impl<'a> HttpClient<'a> {
         Self { stack, host, ip, tx_buf: [0u8; 1536], rx_buf: [0u8; 1536] }
     }
 
-    pub(crate) fn request(
+    pub fn request(
         &'a mut self,
         method: Method,
         route: &str,
         body: Option<&[u8]>,
         timeout_secs: u64,
-        rx_buf: &'a mut [u8; 1536],
-        tx_buf: &'a mut [u8; 1536],
     ) -> Result<String, &'static str> {
         let mut out = String::new();
-        let mut socket = self.stack.get_socket(rx_buf, tx_buf);
+        let mut socket = self.stack.get_socket(&mut self.rx_buf, &mut self.tx_buf);
         socket.work();
         socket.open(self.ip, 80).map_err(|_| "open failed")?;
 
