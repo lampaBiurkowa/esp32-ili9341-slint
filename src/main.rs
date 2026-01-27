@@ -7,42 +7,48 @@
 )]
 
 use alloc::{boxed::Box, rc::Rc};
-use core::{cell::RefCell, ops::Range};
-use embedded_graphics_core::pixelcolor::{Rgb565, raw::RawU16};
-use embedded_hal_bus::spi::{NoDelay, RefCellDevice};
+use core::cell::RefCell;
+use embedded_hal_bus::spi::RefCellDevice;
 use embedded_sdmmc::{Mode, SdCard, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use esp_backtrace as _;
 use esp_hal::{
     Blocking,
+    clock::CpuClock,
     delay::Delay,
     gpio::{
-        Input, Level, Output,
+        Level, Output, OutputPin,
         interconnect::{PeripheralInput, PeripheralOutput},
     },
     main,
     peripherals::Peripherals,
+    rng::Rng,
     spi::master::Spi,
     time::{Instant, Rate},
+    timer::timg::TimerGroup,
 };
-use mipidsi::{
-    Display,
-    interface::SpiInterface,
-    models::ILI9341Rgb565,
-    options::{ColorOrder, Orientation, Rotation},
-};
+use esp_println::println;
 use slint::{
     PhysicalPosition, PhysicalSize, PlatformError,
     platform::{
         Platform, PointerEventButton, WindowAdapter, WindowEvent,
-        software_renderer::{
-            LineBufferProvider, MinimalSoftwareWindow, RepaintBufferType, Rgb565Pixel,
-        },
+        software_renderer::{MinimalSoftwareWindow, RepaintBufferType},
         update_timers_and_animations,
     },
 };
-use xpt2046::Xpt2046;
+use smoltcp::iface::SocketStorage;
+
+use crate::{
+    display_screen::init_ili9341_display, http_client::{HttpClient, Method}, secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID}, slint_renderer::SlintRenderer, touch_input::{TouchInputProvider, TouchInputResponse, Xpt2046TouchInput}, wifi::{Wifi, obtain_ip}
+};
 
 extern crate alloc;
+
+mod display_screen;
+mod secrets;
+mod slint_renderer;
+mod touch_input;
+mod wifi;
+mod http_client;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -50,133 +56,35 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 slint::include_modules!();
 
-struct DrawBuf<'a> {
-    display: Display<
-        SpiInterface<'a, RefCellDevice<'a, Spi<'a, Blocking>, Output<'a>, NoDelay>, Output<'a>>,
-        ILI9341Rgb565,
-        Output<'a>,
-    >,
-    buffer: [Rgb565Pixel; 320],
-}
-
-impl<'a> DrawBuf<'a> {
-    fn new(
-        spi: &'a RefCell<Spi<'a, Blocking>>,
-        dc_pin: impl esp_hal::gpio::OutputPin + 'a,
-        cs_pin: impl esp_hal::gpio::OutputPin + 'a,
-        rst_pin: impl esp_hal::gpio::OutputPin + 'a,
-        buf512: &'a mut [u8; 512],
-    ) -> Self {
-        let dc = Output::new(dc_pin, Level::Low, Default::default());
-        let cs = Output::new(cs_pin, Level::Low, Default::default());
-        let rst = Output::new(rst_pin, Level::Low, Default::default());
-        let spi = RefCellDevice::new_no_delay(spi, cs).unwrap();
-        let interface = SpiInterface::new(spi, dc, buf512);
-
-        let display: Display<
-            SpiInterface<'_, RefCellDevice<Spi<'_, Blocking>, Output<'_>, NoDelay>, Output<'_>>,
-            ILI9341Rgb565,
-            Output<'_>,
-        > = mipidsi::Builder::new(ILI9341Rgb565, interface)
-            .reset_pin(rst)
-            .orientation(Orientation::new().rotate(Rotation::Deg270).flip_vertical())
-            .color_order(ColorOrder::Bgr)
-            .init(&mut Delay::new())
-            .unwrap();
-
-        let linebuf = [Rgb565Pixel(0); 320];
-        Self {
-            display,
-            buffer: linebuf,
-        }
-    }
-}
-
-impl LineBufferProvider for &mut DrawBuf<'_> {
-    type TargetPixel = Rgb565Pixel;
-
-    fn process_line(
-        &mut self,
-        line: usize,
-        range: Range<usize>,
-        render_fn: impl FnOnce(&mut [Rgb565Pixel]),
-    ) {
-        let buf = &mut self.buffer[range.clone()];
-        render_fn(buf);
-        self.display
-            .set_pixels(
-                range.start as u16,
-                line as u16,
-                range.end as u16,
-                line as u16,
-                buf.iter().map(|x| Rgb565::from(RawU16::new(x.0))),
-            )
-            .unwrap();
-    }
-}
-
-struct Touch<'a> {
-    xpt: Xpt2046<RefCellDevice<'a, Spi<'a, Blocking>, Output<'a>, NoDelay>, Input<'a>>,
-    last_pos: Option<slint::PhysicalPosition>,
-}
-
-impl<'a> Touch<'a> {
-    fn new(
-        spi: &'a RefCell<Spi<'a, Blocking>>,
-        touch_cs_pin: impl esp_hal::gpio::OutputPin + 'a,
-        irq_pin: impl esp_hal::gpio::InputPin + 'a,
-    ) -> Self {
-        let touch_irq_pin = Input::new(irq_pin, Default::default());
-        let touch_cs = Output::new(touch_cs_pin, Level::High, Default::default());
-        let touch_spi_dev = RefCellDevice::new_no_delay(spi, touch_cs).unwrap();
-        let mut xpt = Xpt2046::new(
-            touch_spi_dev,
-            touch_irq_pin,
-            xpt2046::Orientation::Landscape,
-        );
-        xpt.init(&mut Delay::new()).unwrap();
-        Self {
-            xpt,
-            last_pos: None,
-        }
-    }
-
-    fn update(
-        &mut self,
-        window: &Rc<MinimalSoftwareWindow>,
-        screen_w: i32,
-        _screen_h: i32,
-    ) -> Result<(), PlatformError> {
-        self.xpt.run().unwrap();
-
-        if self.xpt.is_touched() {
-            let p = self.xpt.get_touch_point();
-            let x_px = screen_w - 2 * p.x;
-            let y_px = 2 * p.y;
-
-            let pos = PhysicalPosition::new(x_px, y_px);
-            let logical = pos.to_logical(window.scale_factor());
-
-            let event = match self.last_pos.replace(pos) {
-                Some(prev) if prev != pos => WindowEvent::PointerMoved { position: logical },
-                None => WindowEvent::PointerPressed {
+fn handle_input(
+    window: &Rc<MinimalSoftwareWindow>,
+    touch_input_provider: &mut impl TouchInputProvider,
+) -> Result<(), PlatformError> {
+    if let Ok(x) = touch_input_provider.get_input() {
+        match x {
+            TouchInputResponse::Moved { x, y } => {
+                let logical = PhysicalPosition::new(x, y).to_logical(window.scale_factor());
+                window.try_dispatch_event(WindowEvent::PointerMoved { position: logical })?;
+            }
+            TouchInputResponse::Pressed { x, y } => {
+                let logical = PhysicalPosition::new(x, y).to_logical(window.scale_factor());
+                window.try_dispatch_event(WindowEvent::PointerPressed {
                     position: logical,
                     button: PointerEventButton::Left,
-                },
-                _ => WindowEvent::PointerMoved { position: logical },
-            };
-
-            window.try_dispatch_event(event)?;
-        } else if let Some(prev) = self.last_pos.take() {
-            window.try_dispatch_event(WindowEvent::PointerReleased {
-                position: prev.to_logical(window.scale_factor()),
-                button: PointerEventButton::Left,
-            })?;
-            window.try_dispatch_event(WindowEvent::PointerExited)?;
+                })?;
+            }
+            TouchInputResponse::Released { x, y } => {
+                window.try_dispatch_event(WindowEvent::PointerReleased {
+                    position: PhysicalPosition::new(x, y).to_logical(window.scale_factor()),
+                    button: PointerEventButton::Left,
+                })?;
+                window.try_dispatch_event(WindowEvent::PointerExited)?;
+            }
+            TouchInputResponse::NoInput => (),
         }
-
-        Ok(())
     }
+
+    Ok(())
 }
 
 struct DummyTime;
@@ -186,10 +94,7 @@ impl TimeSource for DummyTime {
     }
 }
 
-fn init_sd_card<'a>(
-    spi: &'a RefCell<Spi<'a, Blocking>>,
-    sd_cs_pin: impl esp_hal::gpio::OutputPin + 'a,
-) {
+fn init_sd_card<'a>(spi: &'a RefCell<Spi<'a, Blocking>>, sd_cs_pin: impl OutputPin + 'a) {
     let sd_cs = Output::new(sd_cs_pin, Level::High, Default::default());
     let sd_spi_dev = RefCellDevice::new_no_delay(spi, sd_cs).unwrap();
 
@@ -273,6 +178,92 @@ impl Platform for EspBackend {
             .borrow_mut()
             .take()
             .expect("Peripherals already taken");
+
+        let timg0 = TimerGroup::new(peripherals.TIMG0);
+        let rng = Rng::new();
+        esp_rtos::start(timg0.timer0);
+
+        let radio_init = esp_radio::init().unwrap();
+        let mut sockets_buf: [SocketStorage; 4] = Default::default();
+        let mut wifi = Wifi::new(
+            peripherals.WIFI,
+            &radio_init,
+            WIFI_SSID,
+            WIFI_PASSWORD,
+        );
+        wifi.initialize();
+        let mut stack = Rc::new(wifi::build_stack(wifi.interfaces.sta, &mut sockets_buf, || Instant::now().duration_since_epoch().as_millis(), rng.random()));
+        obtain_ip(&mut stack);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let response = http.request(
+            Method::Get,
+            "/api/Tags/tag-crime",
+            None,
+            10,
+        ).unwrap();
+        println!("{}", response);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let response = http.request(
+            Method::Delete,
+            "/api/Tags/tag-crime",
+            None,
+            10,
+        ).unwrap();
+        println!("{}", response);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(
+            Method::Post,
+            "/api/Tags/tag-crime",
+            Some(body),
+            10,
+        )?;
+        println!("{}", response);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(
+            Method::Put,
+            "/api/Tags/tag-crime",
+            Some(body),
+            10,
+        )?;
+        println!("{}", response);
+
+        let mut http = HttpClient::new(
+            stack.clone(),
+            TEST_ADDRESS,
+            TEST_IP,
+        );
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(
+            Method::Patch,
+            "/api/Tags/tag-crime",
+            Some(body),
+            10,
+        )?;
+        println!("{}", response);
+
+
         //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz
         //XPT 2046 can have around 4MHz - it doesn't work on values that are too big
@@ -295,26 +286,34 @@ impl Platform for EspBackend {
         let slow_spi_ref_cell = RefCell::new(slow_spi);
 
         let mut buf512 = [0u8; 512];
-        let mut drawbuf = DrawBuf::new(
+        let display = init_ili9341_display(
             &fast_spi_ref_cell,
             peripherals.GPIO2,
             peripherals.GPIO15,
             peripherals.GPIO4,
             &mut buf512,
-        );
+        )
+        .unwrap();
+        let mut slint_renderer = SlintRenderer::new(display);
 
         let window = self.window.borrow().clone().unwrap();
         window.set_size(PhysicalSize::new(320, 240));
 
-        // let mut uart = Uart::new(peripherals.UART0, Default::default()).unwrap();
-        let mut xpt = Touch::new(&fast_spi_ref_cell, peripherals.GPIO33, peripherals.GPIO36);
+        let mut touch_input = Xpt2046TouchInput::create(
+            &fast_spi_ref_cell,
+            peripherals.GPIO33,
+            peripherals.GPIO36,
+            320,
+        )
+        .unwrap();
+        touch_input.init().unwrap();
         init_sd_card(&slow_spi_ref_cell, peripherals.GPIO21);
         loop {
             update_timers_and_animations();
-            xpt.update(&window, 320, 240).unwrap();
+            handle_input(&window, &mut touch_input)?;
 
             window.draw_if_needed(|renderer| {
-                renderer.render_by_line(&mut drawbuf);
+                renderer.render_by_line(&mut slint_renderer);
             });
             window.request_redraw();
         }
@@ -325,7 +324,7 @@ impl Platform for EspBackend {
 fn main() -> ! {
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 98768);
 
-    let config = esp_hal::Config::default();
+    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     esp_println::logger::init_logger_from_env();
 
