@@ -209,11 +209,15 @@ impl Platform for EspBackend {
         println!("{}", response);
 
         let mut ws = WsClient::new(
-            stack.clone(),
-            "192.168.100.17", // host header, e.g. "192.168.1.100"
-            TEST_IP,      // IpAddress
+            "testtest",
+            TEST_IP,
         );
-        ws.run().unwrap();
+
+        let mut tcp_rx = [0u8; 1536];
+        let mut tcp_tx = [0u8; 1536];
+        let mut socket = stack.get_socket(&mut tcp_rx, &mut tcp_tx);
+        ws.connect(&mut socket).unwrap();
+        ws.poll(&mut socket, Some(b"jump"));
 
         // let mut http = HttpClient::new(
         //     stack.clone(),
