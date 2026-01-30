@@ -38,17 +38,24 @@ use slint::{
 use smoltcp::iface::SocketStorage;
 
 use crate::{
-    display_screen::init_ili9341_display, http_client::{HttpClient, Method}, secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID}, slint_renderer::SlintRenderer, touch_input::{TouchInputProvider, TouchInputResponse, Xpt2046TouchInput}, wifi::{Wifi, obtain_ip}
+    display_screen::init_ili9341_display,
+    http_client::{HttpClient, Method},
+    secrets::{TEST_ADDRESS, TEST_IP, WIFI_PASSWORD, WIFI_SSID},
+    slint_renderer::SlintRenderer,
+    touch_input::{TouchInputProvider, TouchInputResponse, Xpt2046TouchInput},
+    wifi::{Wifi, obtain_ip},
+    ws_client::WsClient,
 };
 
 extern crate alloc;
 
 mod display_screen;
+mod http_client;
 mod secrets;
 mod slint_renderer;
 mod touch_input;
 mod wifi;
-mod http_client;
+mod ws_client;
 
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
@@ -185,84 +192,83 @@ impl Platform for EspBackend {
 
         let radio_init = esp_radio::init().unwrap();
         let mut sockets_buf: [SocketStorage; 4] = Default::default();
-        let mut wifi = Wifi::new(
-            peripherals.WIFI,
-            &radio_init,
-            WIFI_SSID,
-            WIFI_PASSWORD,
-        );
+        let mut wifi = Wifi::new(peripherals.WIFI, &radio_init, WIFI_SSID, WIFI_PASSWORD);
         wifi.initialize();
-        let mut stack = Rc::new(wifi::build_stack(wifi.interfaces.sta, &mut sockets_buf, || Instant::now().duration_since_epoch().as_millis(), rng.random()));
+        let mut stack = Rc::new(wifi::build_stack(
+            wifi.interfaces.sta,
+            &mut sockets_buf,
+            || Instant::now().duration_since_epoch().as_millis(),
+            rng.random(),
+        ));
         obtain_ip(&mut stack);
 
-        let mut http = HttpClient::new(
-            stack.clone(),
-            TEST_ADDRESS,
-            TEST_IP,
-        );
-        let response = http.request(
-            Method::Get,
-            "/api/Tags/tag-crime",
-            None,
-            10,
-        ).unwrap();
+        let mut http = HttpClient::new(stack.clone(), TEST_ADDRESS, TEST_IP);
+        let response = http
+            .request(Method::Get, "/api/Tags/tag-crime", None, 10)
+            .unwrap();
         println!("{}", response);
 
-        let mut http = HttpClient::new(
+        let mut ws = WsClient::new(
             stack.clone(),
-            TEST_ADDRESS,
-            TEST_IP,
+            "192.168.100.17", // host header, e.g. "192.168.1.100"
+            TEST_IP,      // IpAddress
         );
-        let response = http.request(
-            Method::Delete,
-            "/api/Tags/tag-crime",
-            None,
-            10,
-        ).unwrap();
-        println!("{}", response);
+        ws.run().unwrap();
 
-        let mut http = HttpClient::new(
-            stack.clone(),
-            TEST_ADDRESS,
-            TEST_IP,
-        );
-        let body = br#"{"hello":"esp32"}"#;
-        let response = http.request(
-            Method::Post,
-            "/api/Tags/tag-crime",
-            Some(body),
-            10,
-        )?;
-        println!("{}", response);
+        // let mut http = HttpClient::new(
+        //     stack.clone(),
+        //     TEST_ADDRESS,
+        //     TEST_IP,
+        // );
+        // let response = http.request(
+        //     Method::Delete,
+        //     "/api/Tags/tag-crime",
+        //     None,
+        //     10,
+        // ).unwrap();
+        // println!("{}", response);
 
-        let mut http = HttpClient::new(
-            stack.clone(),
-            TEST_ADDRESS,
-            TEST_IP,
-        );
-        let body = br#"{"hello":"esp32"}"#;
-        let response = http.request(
-            Method::Put,
-            "/api/Tags/tag-crime",
-            Some(body),
-            10,
-        )?;
-        println!("{}", response);
+        // let mut http = HttpClient::new(
+        //     stack.clone(),
+        //     TEST_ADDRESS,
+        //     TEST_IP,
+        // );
+        // let body = br#"{"hello":"esp32"}"#;
+        // let response = http.request(
+        //     Method::Post,
+        //     "/api/Tags/tag-crime",
+        //     Some(body),
+        //     10,
+        // )?;
+        // println!("{}", response);
 
-        let mut http = HttpClient::new(
-            stack.clone(),
-            TEST_ADDRESS,
-            TEST_IP,
-        );
-        let body = br#"{"hello":"esp32"}"#;
-        let response = http.request(
-            Method::Patch,
-            "/api/Tags/tag-crime",
-            Some(body),
-            10,
-        )?;
-        println!("{}", response);
+        // let mut http = HttpClient::new(
+        //     stack.clone(),
+        //     TEST_ADDRESS,
+        //     TEST_IP,
+        // );
+        // let body = br#"{"hello":"esp32"}"#;
+        // let response = http.request(
+        //     Method::Put,
+        //     "/api/Tags/tag-crime",
+        //     Some(body),
+        //     10,
+        // )?;
+        // println!("{}", response);
 
+        // let mut http = HttpClient::new(
+        //     stack.clone(),
+        //     TEST_ADDRESS,
+        //     TEST_IP,
+        // );
+        // let body = br#"{"hello":"esp32"}"#;
+        // let response = http.request(
+        //     Method::Patch,
+        //     "/api/Tags/tag-crime",
+        //     Some(body),
+        //     10,
+        // )?;
+        // println!("{}", response);
 
         //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz
