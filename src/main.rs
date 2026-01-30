@@ -208,71 +208,34 @@ impl Platform for EspBackend {
             .unwrap();
         println!("{}", response);
 
-        let mut ws = WsClient::new(
-            "testtest",
-            TEST_IP,
-        );
+        let mut http = HttpClient::new(stack.clone(), TEST_ADDRESS, TEST_IP);
+        let response = http
+            .request(Method::Delete, "/api/Tags/tag-crime", None, 10)
+            .unwrap();
+        println!("{}", response);
+
+        let mut http = HttpClient::new(stack.clone(), TEST_ADDRESS, TEST_IP);
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(Method::Post, "/api/Tags/tag-crime", Some(body), 10)?;
+        println!("{}", response);
+
+        let mut http = HttpClient::new(stack.clone(), TEST_ADDRESS, TEST_IP);
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(Method::Put, "/api/Tags/tag-crime", Some(body), 10)?;
+        println!("{}", response);
+
+        let mut http = HttpClient::new(stack.clone(), TEST_ADDRESS, TEST_IP);
+        let body = br#"{"hello":"esp32"}"#;
+        let response = http.request(Method::Patch, "/api/Tags/tag-crime", Some(body), 10)?;
+        println!("{}", response);
+
+        let mut ws = WsClient::new("testtest", TEST_IP);
 
         let mut tcp_rx = [0u8; 1536];
         let mut tcp_tx = [0u8; 1536];
         let mut socket = stack.get_socket(&mut tcp_rx, &mut tcp_tx);
         ws.connect(&mut socket).unwrap();
         ws.poll(&mut socket, Some(b"jump"));
-
-        // let mut http = HttpClient::new(
-        //     stack.clone(),
-        //     TEST_ADDRESS,
-        //     TEST_IP,
-        // );
-        // let response = http.request(
-        //     Method::Delete,
-        //     "/api/Tags/tag-crime",
-        //     None,
-        //     10,
-        // ).unwrap();
-        // println!("{}", response);
-
-        // let mut http = HttpClient::new(
-        //     stack.clone(),
-        //     TEST_ADDRESS,
-        //     TEST_IP,
-        // );
-        // let body = br#"{"hello":"esp32"}"#;
-        // let response = http.request(
-        //     Method::Post,
-        //     "/api/Tags/tag-crime",
-        //     Some(body),
-        //     10,
-        // )?;
-        // println!("{}", response);
-
-        // let mut http = HttpClient::new(
-        //     stack.clone(),
-        //     TEST_ADDRESS,
-        //     TEST_IP,
-        // );
-        // let body = br#"{"hello":"esp32"}"#;
-        // let response = http.request(
-        //     Method::Put,
-        //     "/api/Tags/tag-crime",
-        //     Some(body),
-        //     10,
-        // )?;
-        // println!("{}", response);
-
-        // let mut http = HttpClient::new(
-        //     stack.clone(),
-        //     TEST_ADDRESS,
-        //     TEST_IP,
-        // );
-        // let body = br#"{"hello":"esp32"}"#;
-        // let response = http.request(
-        //     Method::Patch,
-        //     "/api/Tags/tag-crime",
-        //     Some(body),
-        //     10,
-        // )?;
-        // println!("{}", response);
 
         //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz

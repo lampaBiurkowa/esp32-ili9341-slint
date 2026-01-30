@@ -1,5 +1,6 @@
-use alloc::rc::Rc;
-use blocking_network_stack::{IoError, Stack, Socket};
+use alloc::format;
+use alloc::string::String;
+use blocking_network_stack::{IoError, Socket};
 use embedded_io::{Read, Write};
 use embedded_websocket::framer::{Framer, ReadResult, Stream};
 use embedded_websocket::{
@@ -10,7 +11,7 @@ use esp_println::println;
 use esp_radio::wifi::WifiDevice;
 use smoltcp::wire::IpAddress;
 
-pub struct WsClient {
+pub(crate) struct WsClient {
     host: &'static str,
     ip: IpAddress,
 
@@ -26,7 +27,7 @@ pub struct WsClient {
 }
 
 impl WsClient {
-    pub fn new(host: &'static str, ip: IpAddress) -> Self {
+    pub(crate) fn new(host: &'static str, ip: IpAddress) -> Self {
         let rng = Rng::new();
 
         Self {
@@ -44,12 +45,11 @@ impl WsClient {
         }
     }
 
-    // ---- handshake / connect ----
-    pub fn connect<'a>(
+    pub(crate) fn connect<'a>(
         &mut self,
         socket: &mut Socket<'a, 'a, WifiDevice<'a>>,
-    ) -> Result<(), &'static str> {
-        socket.open(self.ip, 8765).map_err(|_| "open failed")?;
+    ) -> Result<(), String> {
+        socket.open(self.ip, 8765).map_err(|e| format!("open failed {e}"))?;
 
         let opts = WebSocketOptions {
             path: "/",
@@ -77,7 +77,7 @@ impl WsClient {
     }
 
     // ---- send if there is input ----
-    pub fn poll_send<'a>(
+    pub(crate) fn poll_send<'a>(
         &mut self,
         socket: &mut Socket<'a, 'a, WifiDevice<'a>>,
         msg: Option<&[u8]>,
@@ -105,7 +105,7 @@ impl WsClient {
     }
 
     // ---- try-recv ----
-    pub fn poll_recv<'a>(
+    pub(crate) fn poll_recv<'a>(
         &mut self,
         socket: &mut Socket<'a, 'a, WifiDevice<'a>>,
     ) {
@@ -131,8 +131,7 @@ impl WsClient {
         }
     }
 
-    // ---- convenience poll ----
-    pub fn poll<'a>(
+    pub(crate) fn poll<'a>(
         &mut self,
         socket: &mut Socket<'a, 'a, WifiDevice<'a>>,
         send: Option<&[u8]>,
@@ -142,9 +141,9 @@ impl WsClient {
     }
 }
 
-// ---- adapter ----
-pub struct WsSocket<'a, 'b, 'c>(
-    pub &'c mut Socket<'a, 'b, WifiDevice<'a>>
+// wrapper because rust doesnt allow impl for Socket directly
+struct WsSocket<'a, 'b, 'c>(
+    &'c mut Socket<'a, 'b, WifiDevice<'a>>
 );
 
 impl<'a, 'b, 'c> Stream<IoError> for WsSocket<'a, 'b, 'c>
