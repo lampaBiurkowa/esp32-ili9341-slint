@@ -28,6 +28,7 @@ mipidsi = "0.9.0"
 embedded-hal = "=1.0.0"
 embedded-graphics-core = "0.4.0"
 embedded-hal-bus = "0.3.0"
+embedded-websocket = { version = "0.9.4", default-features = false }
 
 xpt2046 = { git = "https://github.com/lampaBiurkowa/xpt2046.git" }
 embedded-sdmmc = "0.9.0"
