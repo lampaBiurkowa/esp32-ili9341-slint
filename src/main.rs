@@ -235,7 +235,7 @@ impl Platform for EspBackend {
         let mut tcp_tx = [0u8; 1536];
         let mut socket = stack.get_socket(&mut tcp_rx, &mut tcp_tx);
         ws.connect(&mut socket).unwrap();
-        ws.poll(&mut socket, Some(b"jump"));
+        ws.poll(&mut socket, Some(b"test"));
 
         //SD requires 100kHz-400kHz
         //Display in order to be fast needs like 40MHz
